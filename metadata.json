@@ -1,0 +1,8 @@
+{
+  "name": "LINE OA Sales & Tag Sync to Google Sheets",
+  "description": "ระบบตรวจสอบแท็กและการปิดการขาย LINE OA แบบเรียลไทม์ พร้อมเชื่อมต่อและส่งออกข้อมูลไปยัง Google Sheets อัตโนมัติ",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

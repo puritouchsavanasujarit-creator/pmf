@@ -1,0 +1,289 @@
+import { CustomerDeal, DealStatus, TagRule, AdminUser } from '../types';
+
+export const DEFAULT_ADMINS: AdminUser[] = [
+  {
+    id: 'admin-1',
+    name: 'แอดมินแนน',
+    role: 'หัวหน้าทีมขาย (Sales Lead)',
+    phone: '081-234-5678',
+    lineId: 'nan_sales',
+    color: 'emerald',
+    isDefault: true,
+  },
+  {
+    id: 'admin-2',
+    name: 'แอดมินบอย',
+    role: 'เจ้าหน้าที่ฝ่ายขาย (Sales Rep)',
+    phone: '089-876-5432',
+    lineId: 'boy_line',
+    color: 'sky',
+    isDefault: true,
+  },
+  {
+    id: 'admin-3',
+    name: 'แอดมินเก่ง',
+    role: 'ผู้ดูแลเคสพิเศษ (Key Account)',
+    phone: '086-555-4321',
+    lineId: 'keng_pro',
+    color: 'purple',
+    isDefault: true,
+  },
+];
+
+export const DEFAULT_TAG_RULES: TagRule[] = [
+  // WON
+  {
+    id: 'rule-won-1',
+    tag: '#ปิดการขาย',
+    mapsToStatus: 'WON',
+    color: 'emerald',
+    description: 'ลูกค้าตกลงซื้อสินค้า/บริการเรียบร้อย',
+    isSystem: true,
+  },
+  {
+    id: 'rule-won-2',
+    tag: '#โอนแล้ว',
+    mapsToStatus: 'WON',
+    color: 'emerald',
+    description: 'ชำระเงินและแนบสลิปเรียบร้อย',
+    isSystem: true,
+  },
+  {
+    id: 'rule-won-3',
+    tag: '#มัดจำแล้ว',
+    mapsToStatus: 'WON',
+    color: 'teal',
+    description: 'ชำระค่ามัดจำสินค้าแล้ว',
+    isSystem: true,
+  },
+  {
+    id: 'rule-won-4',
+    tag: '#ส่งของแล้ว',
+    mapsToStatus: 'WON',
+    color: 'green',
+    description: 'จัดส่งพัสดุและแจ้งเลขแทร็กกิ้งแล้ว',
+    isSystem: true,
+  },
+
+  // LOST (ขายไม่เสร็จ)
+  {
+    id: 'rule-lost-1',
+    tag: '#ขายไม่เสร็จ',
+    mapsToStatus: 'LOST',
+    color: 'rose',
+    description: 'ไม่สามารถปิดการขายได้ สิ้นสุดการสนทนา',
+    isSystem: true,
+  },
+  {
+    id: 'rule-lost-2',
+    tag: '#ยกเลิก',
+    mapsToStatus: 'LOST',
+    color: 'rose',
+    description: 'ลูกค้ายกเลิกคำสั่งซื้อหรือเปลี่ยนใจ',
+    isSystem: true,
+  },
+  {
+    id: 'rule-lost-3',
+    tag: '#เงียบหาย',
+    mapsToStatus: 'LOST',
+    color: 'amber',
+    description: 'ลูกค้าอ่านไม่ตอบ / ไม่ตอบเกิน 48 ชม.',
+    isSystem: true,
+  },
+  {
+    id: 'rule-lost-4',
+    tag: '#ราคาแพง',
+    mapsToStatus: 'LOST',
+    color: 'orange',
+    description: 'ลูกค้าแจ้งว่างบไม่พอ หรือสินค้าแพงเกินไป',
+    isSystem: true,
+  },
+
+  // IN_PROGRESS
+  {
+    id: 'rule-prog-1',
+    tag: '#สนใจ',
+    mapsToStatus: 'IN_PROGRESS',
+    color: 'sky',
+    description: 'ลูกค้าทักมาสอบถามรายละเอียด สนใจสินค้า',
+    isSystem: true,
+  },
+  {
+    id: 'rule-prog-2',
+    tag: '#รอโอน',
+    mapsToStatus: 'IN_PROGRESS',
+    color: 'blue',
+    description: 'สรุปยอดเงินและส่งเลขบัญชีแล้ว รอสลิป',
+    isSystem: true,
+  },
+  {
+    id: 'rule-prog-3',
+    tag: '#ขอใบเสนอราคา',
+    mapsToStatus: 'IN_PROGRESS',
+    color: 'indigo',
+    description: 'ส่งใบเสนอราคา (Quotation) แล้ว',
+    isSystem: true,
+  },
+  {
+    id: 'rule-prog-4',
+    tag: '#รอตัดสินใจ',
+    mapsToStatus: 'IN_PROGRESS',
+    color: 'violet',
+    description: 'ลูกค้าขอปรึกษาทีมหรือผู้บริหารก่อน',
+    isSystem: true,
+  },
+];
+
+export function extractTagsFromText(text: string): string[] {
+  const matches = text.match(/#[\w\u0E00-\u0E7F]+/g);
+  return matches ? Array.from(new Set(matches)) : [];
+}
+
+export function extractAmountFromText(text: string): number | null {
+  // Matches e.g. 1,500 บาท or 2500.- or 3500 thb
+  const regex = /(\d{1,3}(?:,\d{3})+|\d+)\s*(?:บาท|.-|฿|thb)?/i;
+  const match = text.match(regex);
+  if (match) {
+    const raw = match[1].replace(/,/g, '');
+    const num = parseFloat(raw);
+    if (!isNaN(num) && num > 0) return num;
+  }
+  return null;
+}
+
+export function determineStatusFromTags(tags: string[], rules: TagRule[]): DealStatus {
+  if (!tags || tags.length === 0) return 'UNTAGGED';
+
+  const lowerTags = tags.map((t) => t.toLowerCase());
+
+  // Check WON tags first
+  const wonRules = rules.filter((r) => r.mapsToStatus === 'WON').map((r) => r.tag.toLowerCase());
+  if (lowerTags.some((t) => wonRules.includes(t))) {
+    return 'WON';
+  }
+
+  // Check LOST tags next
+  const lostRules = rules.filter((r) => r.mapsToStatus === 'LOST').map((r) => r.tag.toLowerCase());
+  if (lowerTags.some((t) => lostRules.includes(t))) {
+    return 'LOST';
+  }
+
+  // Check IN_PROGRESS
+  const inProgRules = rules.filter((r) => r.mapsToStatus === 'IN_PROGRESS').map((r) => r.tag.toLowerCase());
+  if (lowerTags.some((t) => inProgRules.includes(t))) {
+    return 'IN_PROGRESS';
+  }
+
+  return 'IN_PROGRESS';
+}
+
+export const INITIAL_MOCK_CUSTOMERS: CustomerDeal[] = [
+  {
+    id: 'deal-001',
+    lineUserId: 'U91a82f71829471abef9182371928371',
+    displayName: 'คุณวิชัย รัตนประเสริฐ (SCB Life)',
+    pictureUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=150&auto=format&fit=crop&q=80',
+    status: 'WON',
+    tags: ['#ปิดการขาย', '#โอนแล้ว', '#คอร์สการตลาด', '#VIP'],
+    amount: 12900,
+    product: 'คอร์ส Master Digital Marketing 2026',
+    adminName: 'แอดมินแนน',
+    lastMessage: 'ส่งสลิปโอนเงิน 12,900 บาท เรียบร้อยแล้วค่ะ ขอบคุณมากนะคะ',
+    lastMessageTime: '10 นาทีที่แล้ว',
+    updatedAt: new Date(Date.now() - 1000 * 60 * 10).toISOString(),
+    syncedToSheet: false,
+    syncedAt: null,
+    notes: 'ลูกค้าขอใบกำกับภาษีในนามบริษัท SCB',
+    phone: '081-456-7890',
+  },
+  {
+    id: 'deal-002',
+    lineUserId: 'U2819385019284729184718293847281',
+    displayName: 'คุณสุชาดา สุขสมบูรณ์',
+    pictureUrl: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=150&auto=format&fit=crop&q=80',
+    status: 'LOST',
+    tags: ['#ขายไม่เสร็จ', '#ราคาแพง', '#ชะลอการสั่งซื้อ'],
+    amount: 4500,
+    product: 'แพ็กเกจอาหารเสริมวิตามินพลัส (3 เดือน)',
+    adminName: 'แอดมินบอย',
+    lastMessage: 'ขอคิดดูก่อนนะคะ พอดีช่วงนี้งบยังไม่ค่อยพร้อมค่ะ ขอบคุณค่ะ',
+    lastMessageTime: '45 นาทีที่แล้ว',
+    updatedAt: new Date(Date.now() - 1000 * 60 * 45).toISOString(),
+    syncedToSheet: false,
+    syncedAt: null,
+    notes: 'เสนอโปรโมชันลด 15% แล้ว ลูกค้ายังลังเลเนื่องจากราคาสูงกว่าที่ตั้งไว้',
+    phone: '089-112-3344',
+  },
+  {
+    id: 'deal-003',
+    lineUserId: 'U8293710293847102948172938471029',
+    displayName: 'คุณกฤษณ์ ธนากุล (ร้านกาแฟ Cozy)',
+    pictureUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=150&auto=format&fit=crop&q=80',
+    status: 'IN_PROGRESS',
+    tags: ['#สนใจ', '#รอโอน', '#เครื่องบดเมล็ดกาแฟ'],
+    amount: 8900,
+    product: 'เครื่องบดกาแฟ Precision Grinder Pro',
+    adminName: 'แอดมินแนน',
+    lastMessage: 'ขอเลขบัญชีกสิกรไทยหน่อยครับ กำลังจะออกไปโอนให้ครับ',
+    lastMessageTime: '1 ชั่วโมงที่แล้ว',
+    updatedAt: new Date(Date.now() - 1000 * 60 * 60).toISOString(),
+    syncedToSheet: false,
+    syncedAt: null,
+    notes: 'ส่งเลขบัญชีให้แล้ว แจ้งส่งด่วนก่อน 16:00 น.',
+    phone: '086-778-9900',
+  },
+  {
+    id: 'deal-004',
+    lineUserId: 'U7718293847192847192837481928374',
+    displayName: 'คุณมนัสวี ว่องไว',
+    pictureUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=150&auto=format&fit=crop&q=80',
+    status: 'WON',
+    tags: ['#ปิดการขาย', '#มัดจำแล้ว', '#จองคิวบริการ'],
+    amount: 5000,
+    product: 'มัดจำบริการตกแต่งบูธงานสัมมนา',
+    adminName: 'แอดมินเก่ง',
+    lastMessage: 'โอนมัดจำ 5,000 บาทแล้วค่ะ รบกวนล็อกคิววันที่ 25 นี้ด้วยนะคะ',
+    lastMessageTime: '2 ชั่วโมงที่แล้ว',
+    updatedAt: new Date(Date.now() - 1000 * 60 * 120).toISOString(),
+    syncedToSheet: false,
+    syncedAt: null,
+    notes: 'นัดดูหน้างานพฤหัสบดีนี้',
+    phone: '092-334-5566',
+  },
+  {
+    id: 'deal-005',
+    lineUserId: 'U1182947192837481928374819283748',
+    displayName: 'คุณพิชญ์ ติยะพงษ์พัฒนา',
+    pictureUrl: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=150&auto=format&fit=crop&q=80',
+    status: 'LOST',
+    tags: ['#ขายไม่เสร็จ', '#เงียบหาย', '#ไม่ตอบเกิน48ชม'],
+    amount: 3200,
+    product: 'ชุดอุปกรณ์แคมปิ้ง Explorer Set',
+    adminName: 'แอดมินบอย',
+    lastMessage: 'ส่งโปรโมชั่นส่วนลดพิเศษให้ทางแชท (อ่านแล้ว)',
+    lastMessageTime: '1 วันที่แล้ว',
+    updatedAt: new Date(Date.now() - 1000 * 60 * 60 * 24).toISOString(),
+    syncedToSheet: false,
+    syncedAt: null,
+    notes: 'ทักติดตามผลไป 2 รอบ ลูกค้าอ่านแล้วแต่ไม่ตอบกลับ',
+    phone: '084-556-7788',
+  },
+  {
+    id: 'deal-006',
+    lineUserId: 'U3391827491827491827491827491827',
+    displayName: 'น้องมายด์ (Mildie Studio)',
+    pictureUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=150&auto=format&fit=crop&q=80',
+    status: 'UNTAGGED',
+    tags: [],
+    amount: 0,
+    product: 'ยังไม่ได้ระบุ',
+    adminName: 'ยังไม่มีแอดมินรับเรื่อง',
+    lastMessage: 'สวัสดีค่ะ สนใจสอบถามราคาแพ็กเกจพรีเมียมค่ะ มีโปรลดอยู่ไหมคะ?',
+    lastMessageTime: '5 นาทีที่แล้ว',
+    updatedAt: new Date(Date.now() - 1000 * 60 * 5).toISOString(),
+    syncedToSheet: false,
+    syncedAt: null,
+    notes: 'ลูกค้าใหม่ ทักเข้ามาจากโฆษณา Facebook Ad',
+    phone: '',
+  },
+];
