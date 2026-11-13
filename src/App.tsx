@@ -45,7 +45,8 @@ import {
   Zap, 
   Bot, 
   FileSpreadsheet, 
-  Sparkles 
+  Sparkles,
+  Lock
 } from 'lucide-react';
 
 const STORAGE_KEYS = {
@@ -57,6 +58,8 @@ const STORAGE_KEYS = {
   ADMINS: 'line_oa_admins_v1',
 };
 
+const DASHBOARD_TOKEN_KEY = 'line_oa_dashboard_token_v1';
+
 export default function App() {
   // Auth state
   const [user, setUser] = useState<User | null>(null);
@@ -66,6 +69,13 @@ export default function App() {
   // App core state
   // Real deal data lives in D1 and is loaded from the Worker API (see the effect below).
   const [deals, setDeals] = useState<CustomerDeal[]>([]);
+
+  // Admin token for the private deals API (kept in this browser, sent as a Bearer header).
+  const [dashboardToken, setDashboardToken] = useState<string>(
+    () => localStorage.getItem(DASHBOARD_TOKEN_KEY) || ''
+  );
+  const [tokenInput, setTokenInput] = useState('');
+  const [dealsError, setDealsError] = useState<string | null>(null);
 
   const [tagRules, setTagRules] = useState<TagRule[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.TAG_RULES);
@@ -190,19 +200,45 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Load the latest deal state per customer from D1 via the Worker API
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/deals')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
-      .then((data) => {
-        if (!cancelled && Array.isArray(data.deals)) setDeals(data.deals);
-      })
-      .catch((err) => console.error('โหลดข้อมูลดีลจาก D1 ไม่สำเร็จ:', err));
-    return () => {
-      cancelled = true;
-    };
+  // Load the latest deal state per customer from the private D1 API
+  const loadDeals = useCallback(async (token: string) => {
+    try {
+      const res = await fetch('/api/deals', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setDealsError(data.error || `ไม่สามารถโหลดข้อมูลได้ (HTTP ${res.status})`);
+        return;
+      }
+      setDealsError(null);
+      if (Array.isArray(data.deals)) setDeals(data.deals);
+    } catch (err) {
+      console.error('โหลดข้อมูลดีลจาก D1 ไม่สำเร็จ:', err);
+    }
   }, []);
+
+  // Refresh automatically every 20 seconds and whenever the tab regains focus
+  useEffect(() => {
+    if (!dashboardToken) return;
+    loadDeals(dashboardToken);
+    const interval = setInterval(() => loadDeals(dashboardToken), 20000);
+    const onFocus = () => loadDeals(dashboardToken);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [dashboardToken, loadDeals]);
+
+  const handleTokenSubmit = (event: React.FormEvent) => {
+    event.preventDefault();
+    const token = tokenInput.trim();
+    if (!token) return;
+    localStorage.setItem(DASHBOARD_TOKEN_KEY, token);
+    setTokenInput('');
+    setDashboardToken(token);
+  };
 
   const addLog = useCallback(
     (
@@ -638,6 +674,50 @@ export default function App() {
   const unsyncedCount = deals.filter((d) => !d.syncedToSheet).length;
   const syncedRowsCount = deals.filter((d) => d.syncedToSheet).length;
 
+  // The dashboard is private: ask for the admin token before showing any deal data.
+  if (!dashboardToken) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-sans">
+        <form
+          onSubmit={handleTokenSubmit}
+          className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl"
+        >
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+              <Lock className="w-5 h-5" />
+            </div>
+            <div>
+              <h1 className="text-sm font-bold text-white">แดชบอร์ดผู้ดูแล</h1>
+              <p className="text-xs text-slate-400">ข้อมูลดีลจาก D1 ถูกจำกัดสิทธิ์</p>
+            </div>
+          </div>
+
+          <p className="text-xs text-slate-400 leading-relaxed">
+            กรอกรหัสผู้ดูแล (DASHBOARD_TOKEN) เพื่ออ่านข้อมูลจริง รหัสจะถูกเก็บไว้ในเบราว์เซอร์นี้เท่านั้น
+          </p>
+
+          <input
+            type="password"
+            value={tokenInput}
+            onChange={(e) => setTokenInput(e.target.value)}
+            placeholder="DASHBOARD_TOKEN"
+            autoFocus
+            className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+          />
+
+          {dealsError && <p className="text-xs text-rose-400">{dealsError}</p>}
+
+          <button
+            type="submit"
+            className="w-full px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/30"
+          >
+            เข้าสู่ระบบ
+          </button>
+        </form>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 flex flex-col font-sans">
       
@@ -678,6 +758,28 @@ export default function App() {
         onExportCsv={handleExportCsv}
         onOpenAdminManagement={() => setIsAdminsOpen(true)}
       />
+
+      {/* Deals API error / token reset */}
+      {dealsError && (
+        <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4">
+          <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/30 text-xs text-rose-200 flex flex-wrap items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              {dealsError}
+            </span>
+            <button
+              onClick={() => {
+                localStorage.removeItem(DASHBOARD_TOKEN_KEY);
+                setDashboardToken('');
+                setDealsError(null);
+              }}
+              className="px-2 py-1 rounded-md bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 font-medium"
+            >
+              เปลี่ยนรหัสผู้ดูแล
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Google Sheets Connection Bar */}
       <GoogleSheetsBar

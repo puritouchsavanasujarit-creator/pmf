@@ -1,5 +1,5 @@
-// Local smoke test for the worker route logic (run with bun).
-import worker, { handleLineWebhook } from '../freebuff.worker.js';
+// Local smoke test for the worker routes (run with bun).
+import worker, { handleLineWebhook, handleDeals } from '../freebuff.worker.js';
 
 const assetsFetch = async (req) => {
   const url = new URL(req.url);
@@ -9,23 +9,31 @@ const assetsFetch = async (req) => {
   return new Response('not found', { status: 404 });
 };
 
-const env = { ASSETS: { fetch: assetsFetch } };
+const CHANNEL_SECRET = 'test-channel-secret';
+const DASHBOARD_TOKEN = 'test-dashboard-token';
+
 const base = 'https://example.com';
+const env = {
+  ASSETS: { fetch: assetsFetch },
+  LINE_CHANNEL_SECRET: CHANNEL_SECRET,
+  DASHBOARD_TOKEN,
+};
 
 const results = [];
 const check = (name, cond, extra = '') => results.push({ name, pass: !!cond, extra });
 
-// 1. GET webhook
-let res = await worker.fetch(new Request(`${base}/api/line/webhook`), env);
-let body = await res.json();
-check('GET /api/line/webhook -> 200', res.status === 200, JSON.stringify(body));
-check('GET reports active', body.status === 'active');
+async function sign(raw) {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(CHANNEL_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(raw)));
+  return Buffer.from(mac).toString('base64');
+}
 
-// 2. Static asset still served
-res = await worker.fetch(new Request(`${base}/`), env);
-check('GET / -> 200 html', res.status === 200 && (await res.text()).includes('app'));
-
-// 3. POST with tags, no secret configured
 const payload = {
   destination: 'U1234',
   events: [
@@ -50,52 +58,32 @@ const payload = {
     },
   ],
 };
+const raw = JSON.stringify(payload);
+const signature = await sign(raw);
+
+// --- Webhook ---
+let res = await worker.fetch(new Request(`${base}/api/line/webhook`), env);
+check('GET webhook -> 200', res.status === 200);
+
 res = await worker.fetch(
   new Request(`${base}/api/line/webhook`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
+    headers: { 'X-Line-Signature': signature },
+    body: raw,
   }),
   env
 );
-body = await res.json();
-check('POST -> 200', res.status === 200, JSON.stringify(body));
+let body = await res.json();
+check('signed POST -> 200', res.status === 200, JSON.stringify(body));
 check('eventsReceived = 3', body.eventsReceived === 3);
 check('detected 2 tagged events', body.detected?.length === 2, JSON.stringify(body.detected));
 check('WON detected', body.detected?.[0]?.status === 'WON');
 check('amount parsed', body.detected?.[0]?.amount === 12900);
 check('LOST detected', body.detected?.[1]?.status === 'LOST');
+check('no CORS wildcard', !res.headers.get('Access-Control-Allow-Origin'));
 
-// 4. Malformed body still 200
-res = await worker.fetch(
-  new Request(`${base}/api/line/webhook`, { method: 'POST', body: 'not-json' }),
-  env
-);
-check('malformed body -> 200', res.status === 200);
-
-// 5. Signature verification with secret
-const secret = 'test-channel-secret';
-const signedEnv = { ...env, LINE_CHANNEL_SECRET: secret };
-const raw = JSON.stringify(payload);
-const key = await crypto.subtle.importKey(
-  'raw',
-  new TextEncoder().encode(secret),
-  { name: 'HMAC', hash: 'SHA-256' },
-  false,
-  ['sign']
-);
-const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(raw)));
-const sig = Buffer.from(mac).toString('base64');
-
-res = await handleLineWebhook(
-  new Request(`${base}/api/line/webhook`, {
-    method: 'POST',
-    headers: { 'X-Line-Signature': sig },
-    body: raw,
-  }),
-  signedEnv
-);
-check('valid signature -> 200', res.status === 200, `status=${res.status}`);
+res = await handleLineWebhook(new Request(`${base}/api/line/webhook`, { method: 'POST', body: raw }), env);
+check('unsigned POST -> 401', res.status === 401, `status=${res.status}`);
 
 res = await handleLineWebhook(
   new Request(`${base}/api/line/webhook`, {
@@ -103,21 +91,54 @@ res = await handleLineWebhook(
     headers: { 'X-Line-Signature': 'bogus' },
     body: raw,
   }),
-  signedEnv
+  env
 );
-check('invalid signature -> 401', res.status === 401, `status=${res.status}`);
+check('bad signature -> 401', res.status === 401, `status=${res.status}`);
 
 res = await handleLineWebhook(
-  new Request(`${base}/api/line/webhook`, { method: 'POST', body: raw }),
-  signedEnv
+  new Request(`${base}/api/line/webhook`, {
+    method: 'POST',
+    headers: { 'X-Line-Signature': signature },
+    body: raw,
+  }),
+  { ...env, LINE_CHANNEL_SECRET: '' }
 );
-check('missing signature -> 401', res.status === 401, `status=${res.status}`);
+check('unconfigured secret -> 503', res.status === 503, `status=${res.status}`);
 
-// 6. OPTIONS + wrong method
-res = await handleLineWebhook(new Request(`${base}/api/line/webhook`, { method: 'OPTIONS' }), env);
-check('OPTIONS -> 204', res.status === 204);
 res = await handleLineWebhook(new Request(`${base}/api/line/webhook`, { method: 'PUT' }), env);
-check('PUT -> 405', res.status === 405);
+check('PUT webhook -> 405', res.status === 405);
+
+// --- Deals ---
+res = await handleDeals(new Request(`${base}/api/deals`), env);
+check('deals without token -> 401', res.status === 401, `status=${res.status}`);
+
+res = await handleDeals(
+  new Request(`${base}/api/deals`, { headers: { Authorization: 'Bearer wrong' } }),
+  env
+);
+check('deals with wrong token -> 401', res.status === 401, `status=${res.status}`);
+
+res = await handleDeals(
+  new Request(`${base}/api/deals`, { headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` } }),
+  env
+);
+body = await res.json();
+check('deals with token -> 200', res.status === 200, JSON.stringify(body));
+check('deals empty without DB binding', Array.isArray(body.deals) && body.deals.length === 0);
+check('deals no CORS wildcard', !res.headers.get('Access-Control-Allow-Origin'));
+
+res = await handleDeals(
+  new Request(`${base}/api/deals`, { headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` } }),
+  { ...env, DASHBOARD_TOKEN: '' }
+);
+check('deals unconfigured token -> 503', res.status === 503, `status=${res.status}`);
+
+res = await handleDeals(new Request(`${base}/api/deals`, { method: 'POST' }), env);
+check('POST deals -> 405', res.status === 405);
+
+// --- Static ---
+res = await worker.fetch(new Request(`${base}/`), env);
+check('GET / -> 200 html', res.status === 200 && (await res.text()).includes('app'));
 
 const failed = results.filter((r) => !r.pass);
 for (const r of results) console.log(`${r.pass ? 'PASS' : 'FAIL'}  ${r.name}${r.pass ? '' : '  ' + r.extra}`);

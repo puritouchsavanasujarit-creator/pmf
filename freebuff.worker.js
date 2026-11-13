@@ -72,9 +72,6 @@ function json(data, status = 200) {
     headers: {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, X-Line-Signature',
     },
   });
 }
@@ -194,24 +191,8 @@ async function listDeals(env) {
 }
 
 export async function handleLineWebhook(request, env) {
-  if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, X-Line-Signature',
-      },
-    });
-  }
-
   if (request.method === 'GET') {
-    return json({
-      status: 'active',
-      message: 'LINE OA Webhook Endpoint is ready',
-      signatureVerification: env?.LINE_CHANNEL_SECRET ? 'enabled' : 'disabled',
-      storage: env?.DB ? 'd1' : 'none',
-    });
+    return json({ status: 'active', message: 'LINE OA Webhook Endpoint is ready' });
   }
 
   if (request.method !== 'POST') {
@@ -220,13 +201,19 @@ export async function handleLineWebhook(request, env) {
 
   const body = await request.text();
 
+  // Without the channel secret every event is unverifiable, so refuse to write anything.
   const channelSecret = env?.LINE_CHANNEL_SECRET;
-  if (channelSecret) {
-    const signature = request.headers.get('X-Line-Signature') || '';
-    const valid = signature ? await verifyLineSignature(body, signature, channelSecret) : false;
-    if (!valid) {
-      return json({ success: false, error: 'Invalid LINE signature' }, 401);
-    }
+  if (!channelSecret) {
+    return json(
+      { success: false, error: 'Webhook ยังไม่พร้อมใช้งาน: ยังไม่ได้ตั้งค่า LINE_CHANNEL_SECRET' },
+      503
+    );
+  }
+
+  const signature = request.headers.get('X-Line-Signature') || '';
+  const valid = signature ? await verifyLineSignature(body, signature, channelSecret) : false;
+  if (!valid) {
+    return json({ success: false, error: 'Invalid LINE signature' }, 401);
   }
 
   let payload;
@@ -256,26 +243,30 @@ export async function handleLineWebhook(request, env) {
 }
 
 export async function handleDeals(request, env) {
-  if (request.method === 'OPTIONS') {
-    return new Response(null, {
-      status: 204,
-      headers: {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-      },
-    });
-  }
-
   if (request.method !== 'GET') {
     return json({ success: false, error: 'Method not allowed' }, 405);
   }
 
+  // The dashboard is private: no shared token configured means no access at all.
+  if (!env?.DASHBOARD_TOKEN) {
+    return json(
+      { success: false, error: 'ยังไม่ได้ตั้งค่า DASHBOARD_TOKEN สำหรับเข้าถึงแดชบอร์ด' },
+      503
+    );
+  }
+
+  const authHeader = request.headers.get('Authorization') || '';
+  const providedToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (!safeEqual(providedToken, env.DASHBOARD_TOKEN)) {
+    return json({ success: false, error: 'ต้องเข้าสู่ระบบผู้ดูแลก่อนอ่านข้อมูล' }, 401);
+  }
+
   try {
     const deals = await listDeals(env);
-    return json({ success: true, deals, storage: env?.DB ? 'd1' : 'none' });
+    return json({ success: true, deals });
   } catch (err) {
     console.error('Failed to load deals:', err);
-    return json({ success: false, error: 'ไม่สามารถอ่านข้อมูลจากฐานข้อมูลได้', deals: [] }, 500);
+    return json({ success: false, error: 'ไม่สามารถอ่านข้อมูลจากฐานข้อมูลได้' }, 500);
   }
 }
 
