@@ -257,6 +257,14 @@ export default function App() {
     loadDeals(dashboardToken);
   };
 
+  const markPendingSave = (ids: string[]) => {
+    const before = pendingSaveIdsRef.current.size;
+    ids.forEach((id) => pendingSaveIdsRef.current.add(id));
+    if (pendingSaveIdsRef.current.size !== before) {
+      setPendingSaveCount(pendingSaveIdsRef.current.size);
+    }
+  };
+
   const clearPendingSave = (ids: string[]) => {
     const before = pendingSaveIdsRef.current.size;
     ids.forEach((id) => pendingSaveIdsRef.current.delete(id));
@@ -266,6 +274,17 @@ export default function App() {
   };
 
   // Persist dashboard edits to D1 in one request; rows stay pending until it succeeds.
+  // One request for the rows, whether the dashboard changes a single deal or many.
+  const callDealsApi = (method: 'PUT' | 'DELETE', lineUserIds: string[], payload: unknown) =>
+    fetch(lineUserIds.length === 1 ? `/api/deals/${encodeURIComponent(lineUserIds[0])}` : '/api/deals', {
+      method,
+      headers: {
+        Authorization: `Bearer ${dashboardToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    });
+
   const saveDealsToD1 = async (dealsToSave: CustomerDeal[]) => {
     if (dealsToSave.length === 0) return;
 
@@ -279,24 +298,14 @@ export default function App() {
       product: deal.product,
     });
 
-    const headers = {
-      Authorization: `Bearer ${dashboardToken}`,
-      'Content-Type': 'application/json',
-    };
-
     try {
-      const res =
+      const res = await callDealsApi(
+        'PUT',
+        dealsToSave.map((deal) => deal.lineUserId),
         dealsToSave.length === 1
-          ? await fetch(`/api/deals/${encodeURIComponent(dealsToSave[0].lineUserId)}`, {
-              method: 'PUT',
-              headers,
-              body: JSON.stringify(payloadFor(dealsToSave[0])),
-            })
-          : await fetch('/api/deals', {
-              method: 'PUT',
-              headers,
-              body: JSON.stringify({ edits: dealsToSave.map(payloadFor) }),
-            });
+          ? payloadFor(dealsToSave[0])
+          : { edits: dealsToSave.map(payloadFor) }
+      );
 
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -318,28 +327,79 @@ export default function App() {
   const applyDealsEdit = (updatedDeals: CustomerDeal[], { persist = true } = {}) => {
     if (updatedDeals.length === 0) return;
 
+    const knownIds = new Set(deals.map((deal) => deal.id));
     const byId = new Map(updatedDeals.map((deal) => [deal.id, deal]));
+    const added = updatedDeals.filter((deal) => !knownIds.has(deal.id));
+
     setDeals((prev) => {
-      const knownIds = new Set(prev.map((deal) => deal.id));
-      const added = updatedDeals.filter((deal) => !knownIds.has(deal.id));
       const updated = prev.map((deal) => byId.get(deal.id) ?? deal);
       return added.length > 0 ? [...added, ...updated] : updated;
     });
 
     if (persist) {
-      const before = pendingSaveIdsRef.current.size;
-      updatedDeals.forEach((deal) => pendingSaveIdsRef.current.add(deal.id));
-      if (pendingSaveIdsRef.current.size !== before) {
-        setPendingSaveCount(pendingSaveIdsRef.current.size);
-      }
+      markPendingSave(updatedDeals.map((deal) => deal.id));
       saveDealsToD1(updatedDeals);
     } else {
-      const knownIds = new Set(deals.map((deal) => deal.id));
-      updatedDeals
-        .filter((deal) => !knownIds.has(deal.id))
-        .forEach((deal) => localOnlyIdsRef.current.add(deal.id));
+      added.forEach((deal) => localOnlyIdsRef.current.add(deal.id));
     }
   };
+
+  // Drop the saved overrides so the rows fall back to the latest LINE event.
+  const resetDealsToLine = async (dealsToReset: CustomerDeal[]) => {
+    if (dealsToReset.length === 0) return;
+
+    const lineUserIds = dealsToReset.map((deal) => deal.lineUserId);
+
+    try {
+      const res = await callDealsApi(
+        'DELETE',
+        lineUserIds,
+        lineUserIds.length === 1 ? {} : { lineUserIds }
+      );
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        showToast(data.error || 'รีเซ็ตค่าไม่สำเร็จ', 'error');
+        return;
+      }
+
+      clearPendingSave(dealsToReset.map((deal) => deal.id));
+      dealsToReset.forEach((deal) => localOnlyIdsRef.current.delete(deal.id));
+      await loadDeals(dashboardToken);
+      showToast(`รีเซ็ต ${dealsToReset.length} ดีลกลับเป็นค่าล่าสุดจาก LINE แล้ว`, 'success');
+    } catch (err) {
+      console.error('รีเซ็ตค่าไม่สำเร็จ:', err);
+      showToast('รีเซ็ตค่าไม่สำเร็จ', 'error');
+    }
+  };
+
+  const confirmReset = (targets: CustomerDeal[], title: string, message: string) => {
+    setConfirmation({
+      isOpen: true,
+      title,
+      message,
+      confirmText: 'รีเซ็ต',
+      isDestructive: true,
+      onConfirm: () => {
+        setConfirmation((prev) => ({ ...prev, isOpen: false }));
+        resetDealsToLine(targets);
+      },
+    });
+  };
+
+  const handleResetDeal = (deal: CustomerDeal) =>
+    confirmReset(
+      [deal],
+      'รีเซ็ตค่าที่แก้ไว้?',
+      `ต้องการลบการแก้ไขของ "${deal.displayName}" และคืนค่าเป็นข้อมูลล่าสุดจาก LINE หรือไม่?`
+    );
+
+  const handleResetAllDeals = () =>
+    confirmReset(
+      deals,
+      'รีเซ็ตทุกดีลกลับเป็นค่าจาก LINE?',
+      `การแก้ไขที่บันทึกไว้ของทั้ง ${deals.length} ดีลจะถูกลบ และกลับไปใช้ค่าล่าสุดจาก LINE`
+    );
 
   // Refresh automatically every 20 seconds and whenever the tab regains focus
   useEffect(() => {
@@ -999,6 +1059,8 @@ export default function App() {
           onExportCsv={handleExportCsv}
           admins={admins}
           onOpenAdminManagement={() => setIsAdminsOpen(true)}
+          onResetDeal={handleResetDeal}
+          onResetAllDeals={handleResetAllDeals}
         />
 
       </main>

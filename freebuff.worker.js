@@ -423,6 +423,64 @@ export async function handleDealsWrite(request, env, lineUserId) {
   }
 }
 
+function parseLineUserIds(body, singleLineUserId) {
+  const ids = singleLineUserId ? [singleLineUserId] : body?.lineUserIds;
+
+  if (!Array.isArray(ids) || ids.length === 0) {
+    return { error: 'ต้องระบุ lineUserIds อย่างน้อย 1 รายการ' };
+  }
+  if (ids.length > MAX_EDITS_PER_REQUEST) {
+    return { error: `รีเซ็ตได้ครั้งละไม่เกิน ${MAX_EDITS_PER_REQUEST} รายการ` };
+  }
+
+  const cleaned = [];
+  for (const id of ids) {
+    const value = typeof id === 'string' ? id.trim() : '';
+    if (!value) return { error: 'ไม่พบรหัสลูกค้า LINE' };
+    cleaned.push(value);
+  }
+  return { ids: cleaned };
+}
+
+/**
+ * Drops dashboard overrides so the customer falls back to the latest LINE event.
+ */
+export async function handleDealsReset(request, env, lineUserId) {
+  if (request.method !== 'DELETE') {
+    return json({ success: false, error: 'Method not allowed' }, 405);
+  }
+
+  const denied = requireDashboardAuth(request, env);
+  if (denied) return denied;
+
+  let body = null;
+  if (!lineUserId) {
+    try {
+      body = await request.json();
+    } catch {
+      body = null;
+    }
+  }
+
+  const parsed = parseLineUserIds(body, lineUserId);
+  if (parsed.error) {
+    return json({ success: false, error: parsed.error }, 400);
+  }
+
+  try {
+    await ensureSchema(env);
+    await env.DB.batch(
+      parsed.ids.map((id) =>
+        env.DB.prepare('DELETE FROM deal_overrides WHERE line_user_id = ?').bind(id)
+      )
+    );
+    return json({ success: true, reset: parsed.ids.length });
+  } catch (err) {
+    console.error('Failed to reset deal overrides:', err);
+    return json({ success: false, error: 'ไม่สามารถรีเซ็ตค่าได้' }, 500);
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -432,14 +490,16 @@ export default {
     }
 
     if (url.pathname === DEALS_PATH || url.pathname === `${DEALS_PATH}/`) {
-      return request.method === 'PUT'
-        ? handleDealsWrite(request, env)
-        : handleDeals(request, env);
+      if (request.method === 'PUT') return handleDealsWrite(request, env);
+      if (request.method === 'DELETE') return handleDealsReset(request, env);
+      return handleDeals(request, env);
     }
 
     if (url.pathname.startsWith(`${DEALS_PATH}/`)) {
       const lineUserId = decodeURIComponent(url.pathname.slice(DEALS_PATH.length + 1));
-      return handleDealsWrite(request, env, lineUserId);
+      return request.method === 'DELETE'
+        ? handleDealsReset(request, env, lineUserId)
+        : handleDealsWrite(request, env, lineUserId);
     }
 
     const response = await env.ASSETS.fetch(request);

@@ -196,6 +196,29 @@ res = await worker.fetch(
 );
 check('batch PUT invalid status -> 400', res.status === 400, `status=${res.status}`);
 
+// --- Resetting overrides ---
+res = await worker.fetch(new Request(`${base}/api/deals`, { method: 'DELETE', body: '{}' }), env);
+check('reset without token -> 401', res.status === 401, `status=${res.status}`);
+
+res = await worker.fetch(
+  new Request(`${base}/api/deals`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` },
+    body: JSON.stringify({ lineUserIds: [] }),
+  }),
+  env
+);
+check('reset with empty ids -> 400', res.status === 400, `status=${res.status}`);
+
+res = await worker.fetch(
+  new Request(`${base}/api/deals/Uabc`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` },
+  }),
+  env
+);
+check('POST deal subpath -> 405', res.status === 405, `status=${res.status}`);
+
 // --- Static ---
 res = await worker.fetch(new Request(`${base}/`), env);
 check('GET / -> 200 html', res.status === 200 && (await res.text()).includes('app'));

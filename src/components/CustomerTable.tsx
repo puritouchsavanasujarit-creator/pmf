@@ -18,7 +18,8 @@ import {
   Send,
   AlertCircle,
   HeartHandshake,
-  Download
+  Download,
+  RotateCcw
 } from 'lucide-react';
 import { CustomerDeal, DealStatus, TagRule } from '../types';
 
@@ -34,6 +35,8 @@ interface CustomerTableProps {
   onExportCsv?: () => void;
   admins?: import('../types').AdminUser[];
   onOpenAdminManagement?: () => void;
+  onResetDeal?: (deal: CustomerDeal) => void;
+  onResetAllDeals?: () => void;
 }
 
 export const CustomerTable: React.FC<CustomerTableProps> = ({
@@ -48,6 +51,8 @@ export const CustomerTable: React.FC<CustomerTableProps> = ({
   onExportCsv,
   admins = [],
   onOpenAdminManagement,
+  onResetDeal,
+  onResetAllDeals,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [editingDeal, setEditingDeal] = useState<CustomerDeal | null>(null);
@@ -257,6 +262,17 @@ export const CustomerTable: React.FC<CustomerTableProps> = ({
             >
               <Download className="w-3.5 h-3.5 text-sky-400" />
               <span className="hidden sm:inline">ส่งออก CSV</span>
+            </button>
+          )}
+
+          {onResetAllDeals && (
+            <button
+              onClick={onResetAllDeals}
+              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-750 text-slate-300 hover:text-white rounded-lg text-xs font-medium border border-slate-700/80 flex items-center gap-1 transition-colors shrink-0"
+              title="ลบการแก้ไขที่บันทึกไว้ทั้งหมด และคืนค่าเป็นข้อมูลล่าสุดจาก LINE"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-amber-400" />
+              <span className="hidden sm:inline">รีเซ็ตจาก LINE</span>
             </button>
           )}
         </div>
@@ -541,6 +557,17 @@ export const CustomerTable: React.FC<CustomerTableProps> = ({
                             title="ผู้ช่วยกู้คืน / ส่งข้อความทักตามลูกค้า"
                           >
                             <HeartHandshake className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+
+                        {/* Reset this deal to the latest LINE data */}
+                        {onResetDeal && (
+                          <button
+                            onClick={() => onResetDeal(deal)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 border border-slate-700/80 hover:border-amber-500/30 transition-all"
+                            title="รีเซ็ตค่านี้กลับเป็นข้อมูลล่าสุดจาก LINE"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
                           </button>
                         )}
 
