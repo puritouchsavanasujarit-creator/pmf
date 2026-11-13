@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { User } from 'firebase/auth';
 import { 
   initAuth, 
@@ -76,6 +76,16 @@ export default function App() {
   );
   const [tokenInput, setTokenInput] = useState('');
   const [dealsError, setDealsError] = useState<string | null>(null);
+
+  // Deals edited on screen since the last load; background refreshes must not overwrite them.
+  const dirtyDealIdsRef = useRef<Set<string>>(new Set());
+  const [dirtyDealCount, setDirtyDealCount] = useState(0);
+
+  const markDealDirty = (id: string) => {
+    if (dirtyDealIdsRef.current.has(id)) return;
+    dirtyDealIdsRef.current.add(id);
+    setDirtyDealCount(dirtyDealIdsRef.current.size);
+  };
 
   const [tagRules, setTagRules] = useState<TagRule[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.TAG_RULES);
@@ -212,11 +222,30 @@ export default function App() {
         return;
       }
       setDealsError(null);
-      if (Array.isArray(data.deals)) setDeals(data.deals);
+
+      const serverDeals: CustomerDeal[] = Array.isArray(data.deals) ? data.deals : [];
+
+      // Merge instead of replacing: rows the user is still editing keep their local state.
+      setDeals((prev) => {
+        const dirty = dirtyDealIdsRef.current;
+        const localById = new Map(prev.map((deal) => [deal.id, deal]));
+        const serverIds = new Set(serverDeals.map((deal) => deal.id));
+        const refreshed = serverDeals.map((deal) =>
+          dirty.has(deal.id) ? localById.get(deal.id) ?? deal : deal
+        );
+        const localOnly = prev.filter((deal) => !serverIds.has(deal.id) && dirty.has(deal.id));
+        return [...localOnly, ...refreshed];
+      });
     } catch (err) {
       console.error('โหลดข้อมูลดีลจาก D1 ไม่สำเร็จ:', err);
     }
   }, []);
+
+  const discardLocalEdits = () => {
+    dirtyDealIdsRef.current.clear();
+    setDirtyDealCount(0);
+    loadDeals(dashboardToken);
+  };
 
   // Refresh automatically every 20 seconds and whenever the tab regains focus
   useEffect(() => {
@@ -398,6 +427,7 @@ export default function App() {
         sheetRow: result.rowNumber,
       };
 
+      markDealDirty(deal.id);
       setDeals((prev) => prev.map((d) => (d.id === deal.id ? updatedDeal : d)));
       setSheetInfo((prev) => (prev ? { ...prev, totalSyncedRows: prev.totalSyncedRows + 1, lastSyncedAt: now } : null));
 
@@ -423,6 +453,7 @@ export default function App() {
       const count = await batchSyncDeals(targetSheet.spreadsheetId, targetSheet.sheetName, dealsToSync, token);
       const now = new Date().toISOString();
 
+      dealsToSync.forEach((d) => markDealDirty(d.id));
       setDeals((prev) =>
         prev.map((d, index) => ({
           ...d,
@@ -526,6 +557,7 @@ export default function App() {
       setDeals((prev) => prev.map((d) => (d.id === existing.id ? targetDeal : d)));
     }
 
+    markDealDirty(targetDeal.id);
     addLog(
       'TAG_EVENT',
       targetDeal.displayName,
@@ -575,6 +607,7 @@ export default function App() {
   };
 
   const handleUpdateDeal = (updatedDeal: CustomerDeal) => {
+    markDealDirty(updatedDeal.id);
     setDeals((prev) => prev.map((d) => (d.id === updatedDeal.id ? updatedDeal : d)));
     addLog('TAG_EVENT', updatedDeal.displayName, 'INFO', `แก้ไขข้อมูล deal และสถานะเป็น "${updatedDeal.status}"`);
   };
@@ -599,6 +632,7 @@ export default function App() {
       notes: `${deal.notes ? deal.notes + ' | ' : ''}กู้คืนสำเร็จเมื่อ ${new Date().toLocaleTimeString('th-TH')}`,
     };
 
+    markDealDirty(deal.id);
     setDeals((prev) => prev.map((d) => (d.id === deal.id ? updatedDeal : d)));
     addLog('TAG_EVENT', deal.displayName, 'INFO', `กู้คืนออเดอร์สำเร็จ! ปรับสถานะเป็น "${newStatus}" พร้อมแท็ก ${addedTag}`);
 
@@ -644,6 +678,7 @@ export default function App() {
 
     // If admin name changed, update deals assigned to old name
     if (oldAdmin && oldAdmin.name !== updatedAdmin.name) {
+      deals.filter((d) => d.adminName === oldAdmin.name).forEach((d) => markDealDirty(d.id));
       setDeals((prev) =>
         prev.map((d) => (d.adminName === oldAdmin.name ? { ...d, adminName: updatedAdmin.name } : d))
       );
@@ -658,6 +693,7 @@ export default function App() {
     setAdmins((prev) => prev.filter((a) => a.id !== adminId));
 
     const newAssignee = reassignToName || 'ยังไม่มีแอดมินรับเรื่อง';
+    deals.filter((d) => d.adminName === target.name).forEach((d) => markDealDirty(d.id));
     setDeals((prev) =>
       prev.map((d) => (d.adminName === target.name ? { ...d, adminName: newAssignee } : d))
     );
@@ -759,25 +795,42 @@ export default function App() {
         onOpenAdminManagement={() => setIsAdminsOpen(true)}
       />
 
-      {/* Deals API error / token reset */}
-      {dealsError && (
-        <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4">
-          <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/30 text-xs text-rose-200 flex flex-wrap items-center justify-between gap-2">
-            <span className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              {dealsError}
-            </span>
-            <button
-              onClick={() => {
-                localStorage.removeItem(DASHBOARD_TOKEN_KEY);
-                setDashboardToken('');
-                setDealsError(null);
-              }}
-              className="px-2 py-1 rounded-md bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 font-medium"
-            >
-              เปลี่ยนรหัสผู้ดูแล
-            </button>
-          </div>
+      {/* Notices: API/token errors and unsaved local edits */}
+      {(dealsError || dirtyDealCount > 0) && (
+        <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 space-y-2">
+          {dealsError && (
+            <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/30 text-xs text-rose-200 flex flex-wrap items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                {dealsError}
+              </span>
+              <button
+                onClick={() => {
+                  localStorage.removeItem(DASHBOARD_TOKEN_KEY);
+                  setDashboardToken('');
+                  setDealsError(null);
+                }}
+                className="px-2 py-1 rounded-md bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 font-medium"
+              >
+                เปลี่ยนรหัสผู้ดูแล
+              </button>
+            </div>
+          )}
+
+          {dirtyDealCount > 0 && (
+            <div className="p-3 rounded-xl bg-amber-950/50 border border-amber-500/30 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                มีการแก้ไขบนหน้าจอ {dirtyDealCount} รายการที่ยังไม่ถูกบันทึก — รีเฟรชอัตโนมัติจะไม่ทับรายการเหล่านี้
+              </span>
+              <button
+                onClick={discardLocalEdits}
+                className="px-2 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 font-medium"
+              >
+                ทิ้งการแก้ไขและโหลดใหม่
+              </button>
+            </div>
+          )}
         </div>
       )}
 
