@@ -154,6 +154,9 @@ export default function App() {
     onConfirm: () => {},
   });
 
+  const closeConfirmation = () =>
+    setConfirmation((prev) => ({ ...prev, isOpen: false }));
+
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
     setTimeout(() => {
@@ -275,14 +278,14 @@ export default function App() {
 
   // Persist dashboard edits to D1 in one request; rows stay pending until it succeeds.
   // One request for the rows, whether the dashboard changes a single deal or many.
-  const callDealsApi = (method: 'PUT' | 'DELETE', lineUserIds: string[], payload: unknown) =>
+  const callDealsApi = (method: 'PUT' | 'DELETE', lineUserIds: string[], payload?: unknown) =>
     fetch(lineUserIds.length === 1 ? `/api/deals/${encodeURIComponent(lineUserIds[0])}` : '/api/deals', {
       method,
       headers: {
         Authorization: `Bearer ${dashboardToken}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(payload),
+      body: payload === undefined ? undefined : JSON.stringify(payload),
     });
 
   const saveDealsToD1 = async (dealsToSave: CustomerDeal[]) => {
@@ -315,6 +318,7 @@ export default function App() {
       clearPendingSave(dealsToSave.map((deal) => deal.id));
     } catch (err) {
       console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
+      showToast('บันทึกการแก้ไขลง D1 ไม่สำเร็จ', 'error');
     }
   };
 
@@ -354,7 +358,7 @@ export default function App() {
       const res = await callDealsApi(
         'DELETE',
         lineUserIds,
-        lineUserIds.length === 1 ? {} : { lineUserIds }
+        lineUserIds.length === 1 ? undefined : { lineUserIds }
       );
 
       if (!res.ok) {
@@ -373,33 +377,21 @@ export default function App() {
     }
   };
 
-  const confirmReset = (targets: CustomerDeal[], title: string, message: string) => {
+  const confirmResetDeals = (targets: CustomerDeal[]) =>
     setConfirmation({
       isOpen: true,
-      title,
-      message,
+      title: 'รีเซ็ตกลับเป็นค่าจาก LINE?',
+      message:
+        targets.length === 1
+          ? `ต้องการลบการแก้ไขของ "${targets[0].displayName}" และคืนค่าเป็นข้อมูลล่าสุดจาก LINE หรือไม่?`
+          : `การแก้ไขที่บันทึกไว้ของทั้ง ${targets.length} ดีลจะถูกลบ และกลับไปใช้ค่าล่าสุดจาก LINE`,
       confirmText: 'รีเซ็ต',
       isDestructive: true,
       onConfirm: () => {
-        setConfirmation((prev) => ({ ...prev, isOpen: false }));
+        closeConfirmation();
         resetDealsToLine(targets);
       },
     });
-  };
-
-  const handleResetDeal = (deal: CustomerDeal) =>
-    confirmReset(
-      [deal],
-      'รีเซ็ตค่าที่แก้ไว้?',
-      `ต้องการลบการแก้ไขของ "${deal.displayName}" และคืนค่าเป็นข้อมูลล่าสุดจาก LINE หรือไม่?`
-    );
-
-  const handleResetAllDeals = () =>
-    confirmReset(
-      deals,
-      'รีเซ็ตทุกดีลกลับเป็นค่าจาก LINE?',
-      `การแก้ไขที่บันทึกไว้ของทั้ง ${deals.length} ดีลจะถูกลบ และกลับไปใช้ค่าล่าสุดจาก LINE`
-    );
 
   // Refresh automatically every 20 seconds and whenever the tab regains focus
   useEffect(() => {
@@ -511,7 +503,7 @@ export default function App() {
         message: `สร้าง Google Sheet "${created.title}" เรียบร้อยแล้ว คุณต้องการส่งข้อมูลลูกค้าและแท็กทั้ง ${deals.length} รายการเข้าไปทันทีเลยหรือไม่?`,
         confirmText: 'ส่งออกข้อมูลทั้งหมดทันที',
         onConfirm: async () => {
-          setConfirmation((prev) => ({ ...prev, isOpen: false }));
+          closeConfirmation();
           await performBatchSync(newSheetInfo, deals, token!);
         },
       });
@@ -642,7 +634,7 @@ export default function App() {
       message: `คุณต้องการซิงค์ข้อมูลการปิดการขายและแท็กของลูกค้าทั้งหมด (${deals.length} รายการ) ไปยัง Google Sheet "${sheetInfo.title}" หรือไม่? ข้อมูลจะถูกบันทึก/อัปเดตลงในชีท`,
       confirmText: 'ยืนยันการส่งออกข้อมูล',
       onConfirm: async () => {
-        setConfirmation((prev) => ({ ...prev, isOpen: false }));
+        closeConfirmation();
         let token = await getAccessToken();
         if (!token) {
           const signinRes = await googleSignIn();
@@ -1059,8 +1051,8 @@ export default function App() {
           onExportCsv={handleExportCsv}
           admins={admins}
           onOpenAdminManagement={() => setIsAdminsOpen(true)}
-          onResetDeal={handleResetDeal}
-          onResetAllDeals={handleResetAllDeals}
+          onResetDeal={(deal) => confirmResetDeals([deal])}
+          onResetAllDeals={() => confirmResetDeals(deals)}
         />
 
       </main>
@@ -1155,7 +1147,7 @@ export default function App() {
         confirmText={confirmation.confirmText}
         isDestructive={confirmation.isDestructive}
         onConfirm={confirmation.onConfirm}
-        onCancel={() => setConfirmation((prev) => ({ ...prev, isOpen: false }))}
+        onCancel={closeConfirmation}
       />
 
     </div>
