@@ -17,7 +17,6 @@ import {
 } from './types';
 import { 
   DEFAULT_TAG_RULES, 
-  INITIAL_MOCK_CUSTOMERS, 
   determineStatusFromTags,
   DEFAULT_ADMINS
 } from './services/lineService';
@@ -50,7 +49,6 @@ import {
 } from 'lucide-react';
 
 const STORAGE_KEYS = {
-  DEALS: 'line_oa_deals_v1',
   TAG_RULES: 'line_oa_tag_rules_v1',
   LINE_CONFIG: 'line_oa_config_v1',
   SHEET_INFO: 'line_oa_sheet_info_v1',
@@ -66,10 +64,8 @@ export default function App() {
   const [needsAuth, setNeedsAuth] = useState(true);
 
   // App core state
-  const [deals, setDeals] = useState<CustomerDeal[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.DEALS);
-    return saved ? JSON.parse(saved) : INITIAL_MOCK_CUSTOMERS;
-  });
+  // Real deal data lives in D1 and is loaded from the Worker API (see the effect below).
+  const [deals, setDeals] = useState<CustomerDeal[]>([]);
 
   const [tagRules, setTagRules] = useState<TagRule[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.TAG_RULES);
@@ -150,10 +146,6 @@ export default function App() {
     }, 4500);
   }, []);
 
-  // Save changes to localStorage
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.DEALS, JSON.stringify(deals));
-  }, [deals]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.TAG_RULES, JSON.stringify(tagRules));
@@ -196,6 +188,20 @@ export default function App() {
       }
     );
     return () => unsubscribe();
+  }, []);
+
+  // Load the latest deal state per customer from D1 via the Worker API
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/deals')
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
+      .then((data) => {
+        if (!cancelled && Array.isArray(data.deals)) setDeals(data.deals);
+      })
+      .catch((err) => console.error('โหลดข้อมูลดีลจาก D1 ไม่สำเร็จ:', err));
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const addLog = useCallback(
