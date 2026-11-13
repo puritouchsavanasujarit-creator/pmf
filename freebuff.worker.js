@@ -32,7 +32,19 @@ const SCHEMA_STATEMENTS = [
    )`,
   `CREATE INDEX IF NOT EXISTS idx_deal_events_user
      ON deal_events (line_user_id, created_at DESC)`,
+  `CREATE TABLE IF NOT EXISTS deal_overrides (
+     line_user_id TEXT PRIMARY KEY,
+     status TEXT,
+     tags TEXT,
+     amount REAL,
+     notes TEXT,
+     admin_name TEXT,
+     product TEXT,
+     updated_at TEXT NOT NULL
+   )`,
 ];
+
+const DEAL_STATUSES = ['WON', 'LOST', 'IN_PROGRESS', 'UNTAGGED'];
 
 // D1 has no migration runner here, so the Worker creates its own schema once per isolate.
 let schemaPromise = null;
@@ -141,31 +153,33 @@ async function saveDetectedEvents(env, detected) {
   return detected.length;
 }
 
-function toDeal(row) {
-  let tags = [];
+function parseTags(raw) {
   try {
-    const parsed = JSON.parse(row.tags || '[]');
-    if (Array.isArray(parsed)) tags = parsed;
+    const parsed = JSON.parse(raw || '[]');
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    tags = [];
+    return [];
   }
+}
 
+// An override row (saved from the dashboard) wins over the original LINE event.
+function toDeal(row) {
   return {
     id: `deal-${row.id}`,
     lineUserId: row.line_user_id || '',
     displayName: row.display_name || 'ลูกค้า LINE',
     pictureUrl: '',
-    status: row.status,
-    tags,
-    amount: row.latest_amount ?? row.amount ?? 0,
-    product: '',
-    adminName: 'ยังไม่มีแอดมินรับเรื่อง',
+    status: row.override_status ?? row.status,
+    tags: row.override_tags ? parseTags(row.override_tags) : parseTags(row.tags),
+    amount: row.override_amount ?? row.latest_amount ?? row.amount ?? 0,
+    product: row.override_product ?? '',
+    adminName: row.override_admin_name ?? 'ยังไม่มีแอดมินรับเรื่อง',
     lastMessage: row.message || '',
     lastMessageTime: formatThaiRelative(row.created_at),
-    updatedAt: row.created_at,
+    updatedAt: row.override_updated_at ?? row.created_at,
     syncedToSheet: false,
     syncedAt: null,
-    notes: '',
+    notes: row.override_notes ?? '',
   };
 }
 
@@ -174,6 +188,13 @@ async function listDeals(env) {
   await ensureSchema(env);
   const { results } = await env.DB.prepare(
     `SELECT d.*,
+       o.status AS override_status,
+       o.tags AS override_tags,
+       o.amount AS override_amount,
+       o.notes AS override_notes,
+       o.admin_name AS override_admin_name,
+       o.product AS override_product,
+       o.updated_at AS override_updated_at,
        (SELECT a.amount FROM deal_events a
          WHERE a.line_user_id = d.line_user_id AND a.amount IS NOT NULL
          ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS latest_amount
@@ -183,8 +204,9 @@ async function listDeals(env) {
        ) AS rn
        FROM deal_events
      ) d
+     LEFT JOIN deal_overrides o ON o.line_user_id = d.line_user_id
      WHERE d.rn = 1
-     ORDER BY d.created_at DESC
+     ORDER BY COALESCE(o.updated_at, d.created_at) DESC
      LIMIT 100`
   ).all();
   return (results || []).map(toDeal);
@@ -242,12 +264,8 @@ export async function handleLineWebhook(request, env) {
   return json({ success: true, eventsReceived: events.length, detected, saved });
 }
 
-export async function handleDeals(request, env) {
-  if (request.method !== 'GET') {
-    return json({ success: false, error: 'Method not allowed' }, 405);
-  }
-
-  // The dashboard is private: no shared token configured means no access at all.
+// The dashboard is private: no shared token configured means no access at all.
+function requireDashboardAuth(request, env) {
   if (!env?.DASHBOARD_TOKEN) {
     return json(
       { success: false, error: 'ยังไม่ได้ตั้งค่า DASHBOARD_TOKEN สำหรับเข้าถึงแดชบอร์ด' },
@@ -261,12 +279,99 @@ export async function handleDeals(request, env) {
     return json({ success: false, error: 'ต้องเข้าสู่ระบบผู้ดูแลก่อนอ่านข้อมูล' }, 401);
   }
 
+  return null;
+}
+
+export async function handleDeals(request, env) {
+  if (request.method !== 'GET') {
+    return json({ success: false, error: 'Method not allowed' }, 405);
+  }
+
+  const denied = requireDashboardAuth(request, env);
+  if (denied) return denied;
+
   try {
     const deals = await listDeals(env);
     return json({ success: true, deals });
   } catch (err) {
     console.error('Failed to load deals:', err);
     return json({ success: false, error: 'ไม่สามารถอ่านข้อมูลจากฐานข้อมูลได้' }, 500);
+  }
+}
+
+function cleanText(value, maxLength) {
+  return typeof value === 'string' ? value.slice(0, maxLength) : null;
+}
+
+/**
+ * Saves dashboard edits for one customer. The LINE events stay untouched; the
+ * override row is merged on top when the dashboard reads the deals back.
+ */
+export async function handleDealUpdate(request, env, lineUserId) {
+  if (request.method !== 'PUT') {
+    return json({ success: false, error: 'Method not allowed' }, 405);
+  }
+
+  const denied = requireDashboardAuth(request, env);
+  if (denied) return denied;
+
+  if (!lineUserId) {
+    return json({ success: false, error: 'ไม่พบรหัสลูกค้า LINE' }, 400);
+  }
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ success: false, error: 'ข้อมูลที่ส่งมาไม่ใช่ JSON ที่ถูกต้อง' }, 400);
+  }
+
+  const status = body?.status;
+  if (status !== undefined && !DEAL_STATUSES.includes(status)) {
+    return json({ success: false, error: 'สถานะการขายไม่ถูกต้อง' }, 400);
+  }
+
+  const tags = body?.tags === undefined ? null : Array.isArray(body.tags) ? body.tags : null;
+  if (body?.tags !== undefined && !tags) {
+    return json({ success: false, error: 'แท็กต้องเป็นรายการข้อความ' }, 400);
+  }
+
+  const amount = body?.amount === undefined ? null : Number(body.amount);
+  if (amount !== null && (!Number.isFinite(amount) || amount < 0)) {
+    return json({ success: false, error: 'ยอดเงินไม่ถูกต้อง' }, 400);
+  }
+
+  try {
+    await ensureSchema(env);
+    await env.DB.prepare(
+      `INSERT INTO deal_overrides
+         (line_user_id, status, tags, amount, notes, admin_name, product, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(line_user_id) DO UPDATE SET
+         status = excluded.status,
+         tags = excluded.tags,
+         amount = excluded.amount,
+         notes = excluded.notes,
+         admin_name = excluded.admin_name,
+         product = excluded.product,
+         updated_at = excluded.updated_at`
+    )
+      .bind(
+        lineUserId,
+        status ?? null,
+        tags ? JSON.stringify(tags.slice(0, 50).map((tag) => String(tag).slice(0, 60))) : null,
+        amount,
+        cleanText(body?.notes, 500),
+        cleanText(body?.adminName, 120),
+        cleanText(body?.product, 200),
+        new Date().toISOString()
+      )
+      .run();
+
+    return json({ success: true, lineUserId });
+  } catch (err) {
+    console.error('Failed to save deal override:', err);
+    return json({ success: false, error: 'ไม่สามารถบันทึกการแก้ไขลงฐานข้อมูลได้' }, 500);
   }
 }
 
@@ -280,6 +385,11 @@ export default {
 
     if (url.pathname === DEALS_PATH || url.pathname === `${DEALS_PATH}/`) {
       return handleDeals(request, env);
+    }
+
+    if (url.pathname.startsWith(`${DEALS_PATH}/`)) {
+      const lineUserId = decodeURIComponent(url.pathname.slice(DEALS_PATH.length + 1));
+      return handleDealUpdate(request, env, lineUserId);
     }
 
     const response = await env.ASSETS.fetch(request);

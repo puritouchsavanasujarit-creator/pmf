@@ -136,6 +136,32 @@ check('deals unconfigured token -> 503', res.status === 503, `status=${res.statu
 res = await handleDeals(new Request(`${base}/api/deals`, { method: 'POST' }), env);
 check('POST deals -> 405', res.status === 405);
 
+// --- Dashboard writes ---
+res = await worker.fetch(
+  new Request(`${base}/api/deals/Uabc`, { method: 'PUT', body: '{}' }),
+  env
+);
+check('PUT deal without token -> 401', res.status === 401, `status=${res.status}`);
+
+res = await worker.fetch(
+  new Request(`${base}/api/deals/Uabc`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` },
+    body: JSON.stringify({ status: 'BOGUS' }),
+  }),
+  env
+);
+check('PUT invalid status -> 400', res.status === 400, `status=${res.status}`);
+
+res = await worker.fetch(
+  new Request(`${base}/api/deals/Uabc`, {
+    method: 'GET',
+    headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` },
+  }),
+  env
+);
+check('GET deal subpath -> 405', res.status === 405, `status=${res.status}`);
+
 // --- Static ---
 res = await worker.fetch(new Request(`${base}/`), env);
 check('GET / -> 200 html', res.status === 200 && (await res.text()).includes('app'));

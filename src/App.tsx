@@ -247,6 +247,43 @@ export default function App() {
     loadDeals(dashboardToken);
   };
 
+  const clearDealDirty = useCallback((id: string) => {
+    if (!dirtyDealIdsRef.current.delete(id)) return;
+    setDirtyDealCount(dirtyDealIdsRef.current.size);
+  }, []);
+
+  // Persist a dashboard edit to D1; the row stays marked dirty until the write succeeds.
+  const saveDealToD1 = useCallback(
+    async (deal: CustomerDeal) => {
+      try {
+        const res = await fetch(`/api/deals/${encodeURIComponent(deal.lineUserId)}`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${dashboardToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            status: deal.status,
+            tags: deal.tags,
+            amount: deal.amount,
+            notes: deal.notes,
+            adminName: deal.adminName,
+            product: deal.product,
+          }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          showToast(data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ', 'error');
+          return;
+        }
+        clearDealDirty(deal.id);
+      } catch (err) {
+        console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
+      }
+    },
+    [dashboardToken, showToast, clearDealDirty]
+  );
+
   // Refresh automatically every 20 seconds and whenever the tab regains focus
   useEffect(() => {
     if (!dashboardToken) return;
@@ -558,6 +595,7 @@ export default function App() {
     }
 
     markDealDirty(targetDeal.id);
+    if (eventData.customerId !== 'new') saveDealToD1(targetDeal);
     addLog(
       'TAG_EVENT',
       targetDeal.displayName,
@@ -609,6 +647,7 @@ export default function App() {
   const handleUpdateDeal = (updatedDeal: CustomerDeal) => {
     markDealDirty(updatedDeal.id);
     setDeals((prev) => prev.map((d) => (d.id === updatedDeal.id ? updatedDeal : d)));
+    saveDealToD1(updatedDeal);
     addLog('TAG_EVENT', updatedDeal.displayName, 'INFO', `แก้ไขข้อมูล deal และสถานะเป็น "${updatedDeal.status}"`);
   };
 
@@ -634,6 +673,7 @@ export default function App() {
 
     markDealDirty(deal.id);
     setDeals((prev) => prev.map((d) => (d.id === deal.id ? updatedDeal : d)));
+    saveDealToD1(updatedDeal);
     addLog('TAG_EVENT', deal.displayName, 'INFO', `กู้คืนออเดอร์สำเร็จ! ปรับสถานะเป็น "${newStatus}" พร้อมแท็ก ${addedTag}`);
 
     // If AutoSync is ON, push to Sheet right away!
@@ -678,7 +718,12 @@ export default function App() {
 
     // If admin name changed, update deals assigned to old name
     if (oldAdmin && oldAdmin.name !== updatedAdmin.name) {
-      deals.filter((d) => d.adminName === oldAdmin.name).forEach((d) => markDealDirty(d.id));
+      deals
+        .filter((d) => d.adminName === oldAdmin.name)
+        .forEach((d) => {
+          markDealDirty(d.id);
+          saveDealToD1({ ...d, adminName: updatedAdmin.name });
+        });
       setDeals((prev) =>
         prev.map((d) => (d.adminName === oldAdmin.name ? { ...d, adminName: updatedAdmin.name } : d))
       );
@@ -693,7 +738,12 @@ export default function App() {
     setAdmins((prev) => prev.filter((a) => a.id !== adminId));
 
     const newAssignee = reassignToName || 'ยังไม่มีแอดมินรับเรื่อง';
-    deals.filter((d) => d.adminName === target.name).forEach((d) => markDealDirty(d.id));
+    deals
+      .filter((d) => d.adminName === target.name)
+      .forEach((d) => {
+        markDealDirty(d.id);
+        saveDealToD1({ ...d, adminName: newAssignee });
+      });
     setDeals((prev) =>
       prev.map((d) => (d.adminName === target.name ? { ...d, adminName: newAssignee } : d))
     );
