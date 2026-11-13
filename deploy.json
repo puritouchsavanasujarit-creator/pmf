@@ -1,0 +1,10 @@
+{
+  "entrypoint": "freebuff.worker.js",
+  "compatibilityDate": "2026-11-13",
+  "modules": [
+    { "name": "freebuff.worker.js", "type": "esm", "path": "./freebuff.worker.js" },
+    { "name": "shared/tagRules.js", "type": "esm", "path": "./shared/tagRules.js" }
+  ],
+  "assetsDirectory": "./dist",
+  "spa": true
+}
