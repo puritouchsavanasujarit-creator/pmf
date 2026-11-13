@@ -303,21 +303,104 @@ function cleanText(value, maxLength) {
   return typeof value === 'string' ? value.slice(0, maxLength) : null;
 }
 
+function normalizeDealEdit(body) {
+  if (!body || typeof body !== 'object') return { error: 'ข้อมูลที่ส่งมาไม่ถูกต้อง' };
+
+  const status = body.status;
+  if (status !== undefined && !DEAL_STATUSES.includes(status)) {
+    return { error: 'สถานะการขายไม่ถูกต้อง' };
+  }
+
+  let tags = null;
+  if (body.tags !== undefined) {
+    if (!Array.isArray(body.tags)) return { error: 'แท็กต้องเป็นรายการข้อความ' };
+    tags = JSON.stringify(body.tags.slice(0, 50).map((tag) => String(tag).slice(0, 60)));
+  }
+
+  let amount = null;
+  if (body.amount !== undefined) {
+    amount = Number(body.amount);
+    if (!Number.isFinite(amount) || amount < 0) return { error: 'ยอดเงินไม่ถูกต้อง' };
+  }
+
+  return {
+    fields: {
+      status: status ?? null,
+      tags,
+      amount,
+      notes: cleanText(body.notes, 500),
+      adminName: cleanText(body.adminName, 120),
+      product: cleanText(body.product, 200),
+    },
+  };
+}
+
+const OVERRIDE_UPSERT = `INSERT INTO deal_overrides
+     (line_user_id, status, tags, amount, notes, admin_name, product, updated_at)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+   ON CONFLICT(line_user_id) DO UPDATE SET
+     status = excluded.status,
+     tags = excluded.tags,
+     amount = excluded.amount,
+     notes = excluded.notes,
+     admin_name = excluded.admin_name,
+     product = excluded.product,
+     updated_at = excluded.updated_at`;
+
+async function upsertOverrides(env, entries) {
+  await ensureSchema(env);
+  const updatedAt = new Date().toISOString();
+  await env.DB.batch(
+    entries.map((entry) =>
+      env.DB.prepare(OVERRIDE_UPSERT).bind(
+        entry.lineUserId,
+        entry.fields.status,
+        entry.fields.tags,
+        entry.fields.amount,
+        entry.fields.notes,
+        entry.fields.adminName,
+        entry.fields.product,
+        updatedAt
+      )
+    )
+  );
+}
+
+const MAX_EDITS_PER_REQUEST = 100;
+
+function parseEdits(body, singleLineUserId) {
+  const edits = singleLineUserId ? [{ ...(body || {}), lineUserId: singleLineUserId }] : body?.edits;
+
+  if (!Array.isArray(edits) || edits.length === 0) {
+    return { error: 'ต้องส่งรายการ edits อย่างน้อย 1 รายการ' };
+  }
+  if (edits.length > MAX_EDITS_PER_REQUEST) {
+    return { error: `แก้ไขได้ครั้งละไม่เกิน ${MAX_EDITS_PER_REQUEST} รายการ` };
+  }
+
+  const entries = [];
+  for (const edit of edits) {
+    const lineUserId = typeof edit?.lineUserId === 'string' ? edit.lineUserId.trim() : '';
+    if (!lineUserId) return { error: 'ไม่พบรหัสลูกค้า LINE' };
+    const normalized = normalizeDealEdit(edit);
+    if (normalized.error) return { error: normalized.error };
+    entries.push({ lineUserId, fields: normalized.fields });
+  }
+  return { entries };
+}
+
 /**
- * Saves dashboard edits for one customer. The LINE events stay untouched; the
- * override row is merged on top when the dashboard reads the deals back.
+ * Saves dashboard edits: one customer when `lineUserId` is given, otherwise every
+ * entry in `body.edits`. LINE events stay untouched; overrides are merged on top
+ * when the dashboard reads the deals back.
  */
-export async function handleDealUpdate(request, env, lineUserId) {
+export async function handleDealsWrite(request, env, lineUserId) {
   if (request.method !== 'PUT') {
     return json({ success: false, error: 'Method not allowed' }, 405);
   }
 
   const denied = requireDashboardAuth(request, env);
   if (denied) return denied;
-
-  if (!lineUserId) {
-    return json({ success: false, error: 'ไม่พบรหัสลูกค้า LINE' }, 400);
-  }
 
   let body;
   try {
@@ -326,51 +409,16 @@ export async function handleDealUpdate(request, env, lineUserId) {
     return json({ success: false, error: 'ข้อมูลที่ส่งมาไม่ใช่ JSON ที่ถูกต้อง' }, 400);
   }
 
-  const status = body?.status;
-  if (status !== undefined && !DEAL_STATUSES.includes(status)) {
-    return json({ success: false, error: 'สถานะการขายไม่ถูกต้อง' }, 400);
-  }
-
-  const tags = body?.tags === undefined ? null : Array.isArray(body.tags) ? body.tags : null;
-  if (body?.tags !== undefined && !tags) {
-    return json({ success: false, error: 'แท็กต้องเป็นรายการข้อความ' }, 400);
-  }
-
-  const amount = body?.amount === undefined ? null : Number(body.amount);
-  if (amount !== null && (!Number.isFinite(amount) || amount < 0)) {
-    return json({ success: false, error: 'ยอดเงินไม่ถูกต้อง' }, 400);
+  const parsed = parseEdits(body, lineUserId);
+  if (parsed.error) {
+    return json({ success: false, error: parsed.error }, 400);
   }
 
   try {
-    await ensureSchema(env);
-    await env.DB.prepare(
-      `INSERT INTO deal_overrides
-         (line_user_id, status, tags, amount, notes, admin_name, product, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(line_user_id) DO UPDATE SET
-         status = excluded.status,
-         tags = excluded.tags,
-         amount = excluded.amount,
-         notes = excluded.notes,
-         admin_name = excluded.admin_name,
-         product = excluded.product,
-         updated_at = excluded.updated_at`
-    )
-      .bind(
-        lineUserId,
-        status ?? null,
-        tags ? JSON.stringify(tags.slice(0, 50).map((tag) => String(tag).slice(0, 60))) : null,
-        amount,
-        cleanText(body?.notes, 500),
-        cleanText(body?.adminName, 120),
-        cleanText(body?.product, 200),
-        new Date().toISOString()
-      )
-      .run();
-
-    return json({ success: true, lineUserId });
+    await upsertOverrides(env, parsed.entries);
+    return json({ success: true, saved: parsed.entries.length });
   } catch (err) {
-    console.error('Failed to save deal override:', err);
+    console.error('Failed to save deal overrides:', err);
     return json({ success: false, error: 'ไม่สามารถบันทึกการแก้ไขลงฐานข้อมูลได้' }, 500);
   }
 }
@@ -384,12 +432,14 @@ export default {
     }
 
     if (url.pathname === DEALS_PATH || url.pathname === `${DEALS_PATH}/`) {
-      return handleDeals(request, env);
+      return request.method === 'PUT'
+        ? handleDealsWrite(request, env)
+        : handleDeals(request, env);
     }
 
     if (url.pathname.startsWith(`${DEALS_PATH}/`)) {
       const lineUserId = decodeURIComponent(url.pathname.slice(DEALS_PATH.length + 1));
-      return handleDealUpdate(request, env, lineUserId);
+      return handleDealsWrite(request, env, lineUserId);
     }
 
     const response = await env.ASSETS.fetch(request);

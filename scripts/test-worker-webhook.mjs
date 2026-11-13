@@ -162,6 +162,40 @@ res = await worker.fetch(
 );
 check('GET deal subpath -> 405', res.status === 405, `status=${res.status}`);
 
+// --- Batch dashboard writes ---
+res = await worker.fetch(new Request(`${base}/api/deals`, { method: 'PUT', body: '{}' }), env);
+check('batch PUT without token -> 401', res.status === 401, `status=${res.status}`);
+
+res = await worker.fetch(
+  new Request(`${base}/api/deals`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` },
+    body: JSON.stringify({ edits: [] }),
+  }),
+  env
+);
+check('batch PUT empty edits -> 400', res.status === 400, `status=${res.status}`);
+
+res = await worker.fetch(
+  new Request(`${base}/api/deals`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` },
+    body: JSON.stringify({ edits: Array.from({ length: 101 }, (_, i) => ({ lineUserId: `U${i}` })) }),
+  }),
+  env
+);
+check('batch PUT too many edits -> 400', res.status === 400, `status=${res.status}`);
+
+res = await worker.fetch(
+  new Request(`${base}/api/deals`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${DASHBOARD_TOKEN}` },
+    body: JSON.stringify({ edits: [{ lineUserId: 'Uabc', status: 'NOPE' }] }),
+  }),
+  env
+);
+check('batch PUT invalid status -> 400', res.status === 400, `status=${res.status}`);
+
 // --- Static ---
 res = await worker.fetch(new Request(`${base}/`), env);
 check('GET / -> 200 html', res.status === 200 && (await res.text()).includes('app'));

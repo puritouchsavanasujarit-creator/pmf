@@ -77,15 +77,10 @@ export default function App() {
   const [tokenInput, setTokenInput] = useState('');
   const [dealsError, setDealsError] = useState<string | null>(null);
 
-  // Deals edited on screen since the last load; background refreshes must not overwrite them.
-  const dirtyDealIdsRef = useRef<Set<string>>(new Set());
-  const [dirtyDealCount, setDirtyDealCount] = useState(0);
-
-  const markDealDirty = (id: string) => {
-    if (dirtyDealIdsRef.current.has(id)) return;
-    dirtyDealIdsRef.current.add(id);
-    setDirtyDealCount(dirtyDealIdsRef.current.size);
-  };
+  // Rows with edits still waiting for D1, and rows D1 does not know yet (simulator).
+  const pendingSaveIdsRef = useRef<Set<string>>(new Set());
+  const localOnlyIdsRef = useRef<Set<string>>(new Set());
+  const [pendingSaveCount, setPendingSaveCount] = useState(0);
 
   const [tagRules, setTagRules] = useState<TagRule[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.TAG_RULES);
@@ -225,16 +220,30 @@ export default function App() {
 
       const serverDeals: CustomerDeal[] = Array.isArray(data.deals) ? data.deals : [];
 
-      // Merge instead of replacing: rows the user is still editing keep their local state.
+      // Merge instead of replacing: pending edits win, D1 fills the rest.
       setDeals((prev) => {
-        const dirty = dirtyDealIdsRef.current;
+        const pending = pendingSaveIdsRef.current;
+        const localOnly = localOnlyIdsRef.current;
         const localById = new Map(prev.map((deal) => [deal.id, deal]));
         const serverIds = new Set(serverDeals.map((deal) => deal.id));
-        const refreshed = serverDeals.map((deal) =>
-          dirty.has(deal.id) ? localById.get(deal.id) ?? deal : deal
+
+        const refreshed = serverDeals.map((deal) => {
+          const local = localById.get(deal.id);
+          if (!local) return deal;
+          if (pending.has(deal.id)) return local;
+          // Keep the Google Sheet badge: it is UI state D1 does not store.
+          return {
+            ...deal,
+            syncedToSheet: local.syncedToSheet,
+            syncedAt: local.syncedAt,
+            sheetRow: local.sheetRow,
+          };
+        });
+
+        const keptLocal = prev.filter(
+          (deal) => !serverIds.has(deal.id) && (pending.has(deal.id) || localOnly.has(deal.id))
         );
-        const localOnly = prev.filter((deal) => !serverIds.has(deal.id) && dirty.has(deal.id));
-        return [...localOnly, ...refreshed];
+        return [...keptLocal, ...refreshed];
       });
     } catch (err) {
       console.error('โหลดข้อมูลดีลจาก D1 ไม่สำเร็จ:', err);
@@ -242,40 +251,59 @@ export default function App() {
   }, []);
 
   const discardLocalEdits = () => {
-    dirtyDealIdsRef.current.clear();
-    setDirtyDealCount(0);
+    pendingSaveIdsRef.current.clear();
+    localOnlyIdsRef.current.clear();
+    setPendingSaveCount(0);
     loadDeals(dashboardToken);
   };
 
-  const clearDealDirty = (id: string) => {
-    if (!dirtyDealIdsRef.current.delete(id)) return;
-    setDirtyDealCount(dirtyDealIdsRef.current.size);
+  const clearPendingSave = (ids: string[]) => {
+    const before = pendingSaveIdsRef.current.size;
+    ids.forEach((id) => pendingSaveIdsRef.current.delete(id));
+    if (pendingSaveIdsRef.current.size !== before) {
+      setPendingSaveCount(pendingSaveIdsRef.current.size);
+    }
   };
 
-  // Persist a dashboard edit to D1; the row stays marked dirty until the write succeeds.
-  const saveDealToD1 = async (deal: CustomerDeal) => {
+  // Persist dashboard edits to D1 in one request; rows stay pending until it succeeds.
+  const saveDealsToD1 = async (dealsToSave: CustomerDeal[]) => {
+    if (dealsToSave.length === 0) return;
+
+    const payloadFor = (deal: CustomerDeal) => ({
+      lineUserId: deal.lineUserId,
+      status: deal.status,
+      tags: deal.tags,
+      amount: deal.amount,
+      notes: deal.notes,
+      adminName: deal.adminName,
+      product: deal.product,
+    });
+
+    const headers = {
+      Authorization: `Bearer ${dashboardToken}`,
+      'Content-Type': 'application/json',
+    };
+
     try {
-      const res = await fetch(`/api/deals/${encodeURIComponent(deal.lineUserId)}`, {
-        method: 'PUT',
-        headers: {
-          Authorization: `Bearer ${dashboardToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          status: deal.status,
-          tags: deal.tags,
-          amount: deal.amount,
-          notes: deal.notes,
-          adminName: deal.adminName,
-          product: deal.product,
-        }),
-      });
+      const res =
+        dealsToSave.length === 1
+          ? await fetch(`/api/deals/${encodeURIComponent(dealsToSave[0].lineUserId)}`, {
+              method: 'PUT',
+              headers,
+              body: JSON.stringify(payloadFor(dealsToSave[0])),
+            })
+          : await fetch('/api/deals', {
+              method: 'PUT',
+              headers,
+              body: JSON.stringify({ edits: dealsToSave.map(payloadFor) }),
+            });
+
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         showToast(data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ', 'error');
         return;
       }
-      clearDealDirty(deal.id);
+      clearPendingSave(dealsToSave.map((deal) => deal.id));
     } catch (err) {
       console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
     }
@@ -283,8 +311,9 @@ export default function App() {
 
   /**
    * Single entry point for edits: updates the screen, protects the rows from the
-   * background refresh, and persists to D1. Pass `{ persist: false }` for rows
-   * D1 does not know yet or for UI-only state (e.g. the Google Sheet badge).
+   * background refresh, and persists to D1 in one request. Saved edits count as
+   * pending until the write succeeds; rows D1 does not know yet (simulator) are
+   * kept locally without counting as unsaved work.
    */
   const applyDealsEdit = (updatedDeals: CustomerDeal[], { persist = true } = {}) => {
     if (updatedDeals.length === 0) return;
@@ -297,10 +326,19 @@ export default function App() {
       return added.length > 0 ? [...added, ...updated] : updated;
     });
 
-    updatedDeals.forEach((deal) => {
-      markDealDirty(deal.id);
-      if (persist) saveDealToD1(deal);
-    });
+    if (persist) {
+      const before = pendingSaveIdsRef.current.size;
+      updatedDeals.forEach((deal) => pendingSaveIdsRef.current.add(deal.id));
+      if (pendingSaveIdsRef.current.size !== before) {
+        setPendingSaveCount(pendingSaveIdsRef.current.size);
+      }
+      saveDealsToD1(updatedDeals);
+    } else {
+      const knownIds = new Set(deals.map((deal) => deal.id));
+      updatedDeals
+        .filter((deal) => !knownIds.has(deal.id))
+        .forEach((deal) => localOnlyIdsRef.current.add(deal.id));
+    }
   };
 
   // Refresh automatically every 20 seconds and whenever the tab regains focus
@@ -610,7 +648,8 @@ export default function App() {
       };
     }
 
-    // A simulator-created customer has no LINE event in D1 yet, so it stays local.
+    // A simulator-created customer has no LINE event in D1 yet, so it stays local
+    // without counting as unsaved work.
     applyDealsEdit([targetDeal], { persist: eventData.customerId !== 'new' });
 
     addLog(
@@ -851,7 +890,7 @@ export default function App() {
       />
 
       {/* Notices: API/token errors and unsaved local edits */}
-      {(dealsError || dirtyDealCount > 0) && (
+      {(dealsError || pendingSaveCount > 0) && (
         <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 space-y-2">
           {dealsError && (
             <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/30 text-xs text-rose-200 flex flex-wrap items-center justify-between gap-2">
@@ -872,11 +911,11 @@ export default function App() {
             </div>
           )}
 
-          {dirtyDealCount > 0 && (
+          {pendingSaveCount > 0 && (
             <div className="p-3 rounded-xl bg-amber-950/50 border border-amber-500/30 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-2">
               <span className="flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" />
-                มีการแก้ไขบนหน้าจอ {dirtyDealCount} รายการที่ยังไม่ถูกบันทึก — รีเฟรชอัตโนมัติจะไม่ทับรายการเหล่านี้
+                มีการแก้ไขบนหน้าจอ {pendingSaveCount} รายการที่ยังบันทึกลง D1 ไม่สำเร็จ — รีเฟรชอัตโนมัติจะไม่ทับรายการเหล่านี้
               </span>
               <button
                 onClick={discardLocalEdits}
