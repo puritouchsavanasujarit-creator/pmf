@@ -247,42 +247,61 @@ export default function App() {
     loadDeals(dashboardToken);
   };
 
-  const clearDealDirty = useCallback((id: string) => {
+  const clearDealDirty = (id: string) => {
     if (!dirtyDealIdsRef.current.delete(id)) return;
     setDirtyDealCount(dirtyDealIdsRef.current.size);
-  }, []);
+  };
 
   // Persist a dashboard edit to D1; the row stays marked dirty until the write succeeds.
-  const saveDealToD1 = useCallback(
-    async (deal: CustomerDeal) => {
-      try {
-        const res = await fetch(`/api/deals/${encodeURIComponent(deal.lineUserId)}`, {
-          method: 'PUT',
-          headers: {
-            Authorization: `Bearer ${dashboardToken}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            status: deal.status,
-            tags: deal.tags,
-            amount: deal.amount,
-            notes: deal.notes,
-            adminName: deal.adminName,
-            product: deal.product,
-          }),
-        });
-        if (!res.ok) {
-          const data = await res.json().catch(() => ({}));
-          showToast(data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ', 'error');
-          return;
-        }
-        clearDealDirty(deal.id);
-      } catch (err) {
-        console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
+  const saveDealToD1 = async (deal: CustomerDeal) => {
+    try {
+      const res = await fetch(`/api/deals/${encodeURIComponent(deal.lineUserId)}`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${dashboardToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          status: deal.status,
+          tags: deal.tags,
+          amount: deal.amount,
+          notes: deal.notes,
+          adminName: deal.adminName,
+          product: deal.product,
+        }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        showToast(data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ', 'error');
+        return;
       }
-    },
-    [dashboardToken, showToast, clearDealDirty]
-  );
+      clearDealDirty(deal.id);
+    } catch (err) {
+      console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
+    }
+  };
+
+  /**
+   * Single entry point for edits: updates the screen, protects the rows from the
+   * background refresh, and persists to D1. Pass `{ persist: false }` for rows
+   * D1 does not know yet or for UI-only state (e.g. the Google Sheet badge).
+   */
+  const applyDealsEdit = (updatedDeals: CustomerDeal[], { persist = true } = {}) => {
+    if (updatedDeals.length === 0) return;
+
+    const byId = new Map(updatedDeals.map((deal) => [deal.id, deal]));
+    setDeals((prev) => {
+      const knownIds = new Set(prev.map((deal) => deal.id));
+      const added = updatedDeals.filter((deal) => !knownIds.has(deal.id));
+      const updated = prev.map((deal) => byId.get(deal.id) ?? deal);
+      return added.length > 0 ? [...added, ...updated] : updated;
+    });
+
+    updatedDeals.forEach((deal) => {
+      markDealDirty(deal.id);
+      if (persist) saveDealToD1(deal);
+    });
+  };
 
   // Refresh automatically every 20 seconds and whenever the tab regains focus
   useEffect(() => {
@@ -464,8 +483,7 @@ export default function App() {
         sheetRow: result.rowNumber,
       };
 
-      markDealDirty(deal.id);
-      setDeals((prev) => prev.map((d) => (d.id === deal.id ? updatedDeal : d)));
+      applyDealsEdit([updatedDeal], { persist: false });
       setSheetInfo((prev) => (prev ? { ...prev, totalSyncedRows: prev.totalSyncedRows + 1, lastSyncedAt: now } : null));
 
       addLog(
@@ -490,14 +508,14 @@ export default function App() {
       const count = await batchSyncDeals(targetSheet.spreadsheetId, targetSheet.sheetName, dealsToSync, token);
       const now = new Date().toISOString();
 
-      dealsToSync.forEach((d) => markDealDirty(d.id));
-      setDeals((prev) =>
-        prev.map((d, index) => ({
+      applyDealsEdit(
+        deals.map((d, index) => ({
           ...d,
           syncedToSheet: true,
           syncedAt: now,
           sheetRow: index + 2, // header is row 1
-        }))
+        })),
+        { persist: false }
       );
 
       setSheetInfo((prev) => (prev ? { ...prev, totalSyncedRows: count, lastSyncedAt: now } : null));
@@ -573,7 +591,6 @@ export default function App() {
         syncedAt: null,
         notes: eventData.notes || '',
       };
-      setDeals((prev) => [targetDeal, ...prev]);
     } else {
       const existing = deals.find((d) => d.id === eventData.customerId);
       if (!existing) return;
@@ -591,11 +608,11 @@ export default function App() {
         notes: eventData.notes !== undefined ? eventData.notes : existing.notes,
         syncedToSheet: false,
       };
-      setDeals((prev) => prev.map((d) => (d.id === existing.id ? targetDeal : d)));
     }
 
-    markDealDirty(targetDeal.id);
-    if (eventData.customerId !== 'new') saveDealToD1(targetDeal);
+    // A simulator-created customer has no LINE event in D1 yet, so it stays local.
+    applyDealsEdit([targetDeal], { persist: eventData.customerId !== 'new' });
+
     addLog(
       'TAG_EVENT',
       targetDeal.displayName,
@@ -645,9 +662,7 @@ export default function App() {
   };
 
   const handleUpdateDeal = (updatedDeal: CustomerDeal) => {
-    markDealDirty(updatedDeal.id);
-    setDeals((prev) => prev.map((d) => (d.id === updatedDeal.id ? updatedDeal : d)));
-    saveDealToD1(updatedDeal);
+    applyDealsEdit([updatedDeal]);
     addLog('TAG_EVENT', updatedDeal.displayName, 'INFO', `แก้ไขข้อมูล deal และสถานะเป็น "${updatedDeal.status}"`);
   };
 
@@ -671,9 +686,7 @@ export default function App() {
       notes: `${deal.notes ? deal.notes + ' | ' : ''}กู้คืนสำเร็จเมื่อ ${new Date().toLocaleTimeString('th-TH')}`,
     };
 
-    markDealDirty(deal.id);
-    setDeals((prev) => prev.map((d) => (d.id === deal.id ? updatedDeal : d)));
-    saveDealToD1(updatedDeal);
+    applyDealsEdit([updatedDeal]);
     addLog('TAG_EVENT', deal.displayName, 'INFO', `กู้คืนออเดอร์สำเร็จ! ปรับสถานะเป็น "${newStatus}" พร้อมแท็ก ${addedTag}`);
 
     // If AutoSync is ON, push to Sheet right away!
@@ -718,14 +731,10 @@ export default function App() {
 
     // If admin name changed, update deals assigned to old name
     if (oldAdmin && oldAdmin.name !== updatedAdmin.name) {
-      deals
-        .filter((d) => d.adminName === oldAdmin.name)
-        .forEach((d) => {
-          markDealDirty(d.id);
-          saveDealToD1({ ...d, adminName: updatedAdmin.name });
-        });
-      setDeals((prev) =>
-        prev.map((d) => (d.adminName === oldAdmin.name ? { ...d, adminName: updatedAdmin.name } : d))
+      applyDealsEdit(
+        deals
+          .filter((d) => d.adminName === oldAdmin.name)
+          .map((d) => ({ ...d, adminName: updatedAdmin.name }))
       );
     }
     showToast(`อัปเดตข้อมูล "${updatedAdmin.name}" เรียบร้อยแล้ว`, 'success');
@@ -738,14 +747,10 @@ export default function App() {
     setAdmins((prev) => prev.filter((a) => a.id !== adminId));
 
     const newAssignee = reassignToName || 'ยังไม่มีแอดมินรับเรื่อง';
-    deals
-      .filter((d) => d.adminName === target.name)
-      .forEach((d) => {
-        markDealDirty(d.id);
-        saveDealToD1({ ...d, adminName: newAssignee });
-      });
-    setDeals((prev) =>
-      prev.map((d) => (d.adminName === target.name ? { ...d, adminName: newAssignee } : d))
+    applyDealsEdit(
+      deals
+        .filter((d) => d.adminName === target.name)
+        .map((d) => ({ ...d, adminName: newAssignee }))
     );
 
     addLog('TAG_EVENT', target.name, 'INFO', `ลบแอดมิน "${target.name}" และโอนเคสไปที่ "${newAssignee}"`);
