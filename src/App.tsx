@@ -57,6 +57,7 @@ const STORAGE_KEYS = {
   SYNC_LOGS: 'line_oa_sync_logs_v1',
   AUTO_SYNC: 'line_oa_auto_sync_v1',
   ADMINS: 'line_oa_admins_v1',
+  SAVE_QUEUE: 'line_oa_save_queue_v1',
 };
 
 const DASHBOARD_TOKEN_KEY = 'line_oa_dashboard_token_v1';
@@ -70,6 +71,23 @@ const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, 
 // 401/403/503 will not fix themselves; network errors and other 5xx can.
 const isRetryableStatus = (status: number) =>
   status === 408 || status === 429 || (status >= 500 && status !== 503);
+
+// Rows whose save never reached D1 stay on the device so a reload can retry them.
+function loadQueuedDeals(): Map<string, CustomerDeal> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.SAVE_QUEUE);
+    const parsed: unknown = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(parsed)) return new Map();
+
+    return new Map(
+      parsed
+        .filter((deal): deal is CustomerDeal => Boolean(deal?.id && deal?.lineUserId))
+        .map((deal) => [deal.id, deal])
+    );
+  } catch {
+    return new Map();
+  }
+}
 
 class SaveFailure extends Error {
   readonly retryable: boolean;
@@ -100,15 +118,16 @@ export default function App() {
   const [dealsError, setDealsError] = useState<string | null>(null);
 
   // Rows with edits still waiting for D1, and rows D1 does not know yet (simulator).
-  const pendingSaveIdsRef = useRef<Set<string>>(new Set());
-  const saveQueueRef = useRef<Map<string, CustomerDeal>>(new Map());
+  const [restoredQueue] = useState(loadQueuedDeals);
+  const pendingSaveIdsRef = useRef<Set<string>>(new Set(restoredQueue.keys()));
+  const saveQueueRef = useRef<Map<string, CustomerDeal>>(restoredQueue);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savingRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveBlockedRef = useRef(false);
   const saveNotifiedRef = useRef(false);
   const localOnlyIdsRef = useRef<Set<string>>(new Set());
-  const [pendingSaveCount, setPendingSaveCount] = useState(0);
+  const [pendingSaveCount, setPendingSaveCount] = useState(restoredQueue.size);
 
   const [tagRules, setTagRules] = useState<TagRule[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.TAG_RULES);
@@ -330,6 +349,7 @@ export default function App() {
     saveQueueRef.current.clear();
     saveBlockedRef.current = false;
     clearSaveTimers();
+    persistQueue();
 
     pendingSaveIdsRef.current.clear();
     localOnlyIdsRef.current.clear();
@@ -342,6 +362,19 @@ export default function App() {
     ids.forEach((id) => pendingSaveIdsRef.current.add(id));
     if (pendingSaveIdsRef.current.size !== before) {
       setPendingSaveCount(pendingSaveIdsRef.current.size);
+    }
+  };
+
+  const persistQueue = () => {
+    try {
+      const queued = [...saveQueueRef.current.values()];
+      if (queued.length === 0) {
+        localStorage.removeItem(STORAGE_KEYS.SAVE_QUEUE);
+      } else {
+        localStorage.setItem(STORAGE_KEYS.SAVE_QUEUE, JSON.stringify(queued));
+      }
+    } catch (err) {
+      console.error('เก็บคิวการบันทึกลงเครื่องไม่สำเร็จ:', err);
     }
   };
 
@@ -425,6 +458,7 @@ export default function App() {
           try {
             await sendDealsToD1(batch);
             clearPendingSave(batch.map((deal) => deal.id));
+            persistQueue();
             saveNotifiedRef.current = false;
             break;
           } catch (err) {
@@ -440,6 +474,7 @@ export default function App() {
             console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
 
             restoreQueued(batch);
+            persistQueue();
             notifySaveFailure(message);
 
             if (retryable) {
@@ -462,6 +497,7 @@ export default function App() {
     if (dealsToSave.length === 0) return;
     dealsToSave.forEach((deal) => saveQueueRef.current.set(deal.id, deal));
     saveBlockedRef.current = false;
+    persistQueue();
 
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
@@ -490,6 +526,11 @@ export default function App() {
 
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
+  }, [dashboardToken]);
+
+  // Rows restored from the previous session go out as soon as we have a token.
+  useEffect(() => {
+    if (dashboardToken && saveQueueRef.current.size > 0) flushPendingSaves();
   }, [dashboardToken]);
 
   /**
@@ -542,6 +583,7 @@ export default function App() {
         saveQueueRef.current.delete(deal.id);
         localOnlyIdsRef.current.delete(deal.id);
       });
+      persistQueue();
       await loadDeals(dashboardToken);
       showToast(`รีเซ็ต ${dealsToReset.length} ดีลกลับเป็นค่าล่าสุดจาก LINE แล้ว`, 'success');
     } catch (err) {
