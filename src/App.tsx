@@ -63,6 +63,7 @@ const DASHBOARD_TOKEN_KEY = 'line_oa_dashboard_token_v1';
 const HEALTH_POLL_MS = 60000;
 const SAVE_DEBOUNCE_MS = 600;
 const SAVE_RETRY_DELAYS_MS = [1000, 2000, 4000];
+const SAVE_RETRY_LATER_MS = 15000;
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -90,6 +91,7 @@ export default function App() {
   const saveQueueRef = useRef<Map<string, CustomerDeal>>(new Map());
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savingRef = useRef(false);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const localOnlyIdsRef = useRef<Set<string>>(new Set());
   const [pendingSaveCount, setPendingSaveCount] = useState(0);
 
@@ -351,6 +353,10 @@ export default function App() {
   // One flush at a time; edits made during a save wait for the next round.
   const flushPendingSaves = async () => {
     if (savingRef.current) return;
+    if (!navigator.onLine) {
+      scheduleRetry();
+      return;
+    }
     savingRef.current = true;
 
     try {
@@ -365,13 +371,16 @@ export default function App() {
             break;
           } catch (err) {
             if (attempt >= SAVE_RETRY_DELAYS_MS.length) {
-              // Keep the rows pending so the next edit retries them together.
-              batch.forEach((deal) => saveQueueRef.current.set(deal.id, deal));
+              // An edit made during the save wins: only restore rows the queue lost.
+              batch.forEach((deal) => {
+                if (!saveQueueRef.current.has(deal.id)) saveQueueRef.current.set(deal.id, deal);
+              });
               console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
               showToast(
                 err instanceof Error ? err.message : 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ',
                 'error'
               );
+              scheduleRetry();
               return;
             }
             await wait(SAVE_RETRY_DELAYS_MS[attempt]);
@@ -394,6 +403,28 @@ export default function App() {
       flushPendingSaves();
     }, SAVE_DEBOUNCE_MS);
   };
+
+  // Failed rows stay queued: retry on a timer, and at once when the network returns.
+  const scheduleRetry = (delay = SAVE_RETRY_LATER_MS) => {
+    if (retryTimerRef.current || saveQueueRef.current.size === 0) return;
+    retryTimerRef.current = setTimeout(() => {
+      retryTimerRef.current = null;
+      flushPendingSaves();
+    }, delay);
+  };
+
+  useEffect(() => {
+    const onOnline = () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      flushPendingSaves();
+    };
+
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [dashboardToken]);
 
   /**
    * Single entry point for edits: updates the screen, protects the rows from the
