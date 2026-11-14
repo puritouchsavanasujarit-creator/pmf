@@ -60,6 +60,11 @@ const STORAGE_KEYS = {
 };
 
 const DASHBOARD_TOKEN_KEY = 'line_oa_dashboard_token_v1';
+const HEALTH_POLL_MS = 60000;
+const SAVE_DEBOUNCE_MS = 600;
+const SAVE_RETRY_DELAYS_MS = [1000, 2000, 4000];
+
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 export default function App() {
   // Auth state
@@ -77,10 +82,14 @@ export default function App() {
   );
   const [tokenInput, setTokenInput] = useState('');
   const [health, setHealth] = useState<HealthStatus | null>(null);
+  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
   const [dealsError, setDealsError] = useState<string | null>(null);
 
   // Rows with edits still waiting for D1, and rows D1 does not know yet (simulator).
   const pendingSaveIdsRef = useRef<Set<string>>(new Set());
+  const saveQueueRef = useRef<Map<string, CustomerDeal>>(new Map());
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savingRef = useRef(false);
   const localOnlyIdsRef = useRef<Set<string>>(new Set());
   const [pendingSaveCount, setPendingSaveCount] = useState(0);
 
@@ -160,12 +169,28 @@ export default function App() {
     setConfirmation((prev) => ({ ...prev, isOpen: false }));
 
   // Public endpoint: tells us whether the Worker sees both secrets, without values.
+  const refreshHealth = async () => {
+    setIsCheckingHealth(true);
+    try {
+      const res = await fetch('/api/health');
+      setHealth(res.ok ? await res.json() : null);
+    } catch {
+      setHealth(null);
+    } finally {
+      setIsCheckingHealth(false);
+    }
+  };
+
   useEffect(() => {
-    fetch('/api/health')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data: HealthStatus | null) => setHealth(data))
-      .catch(() => setHealth(null));
+    refreshHealth();
   }, []);
+
+  // Keep checking while something is missing so the warning clears by itself.
+  useEffect(() => {
+    if (!health || health.success) return;
+    const interval = setInterval(refreshHealth, HEALTH_POLL_MS);
+    return () => clearInterval(interval);
+  }, [health?.success]);
 
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
@@ -286,7 +311,6 @@ export default function App() {
     }
   };
 
-  // Persist dashboard edits to D1 in one request; rows stay pending until it succeeds.
   // One request for the rows, whether the dashboard changes a single deal or many.
   const callDealsApi = (method: 'PUT' | 'DELETE', lineUserIds: string[], payload?: unknown) =>
     fetch(lineUserIds.length === 1 ? `/api/deals/${encodeURIComponent(lineUserIds[0])}` : '/api/deals', {
@@ -298,9 +322,8 @@ export default function App() {
       body: payload === undefined ? undefined : JSON.stringify(payload),
     });
 
-  const saveDealsToD1 = async (dealsToSave: CustomerDeal[]) => {
-    if (dealsToSave.length === 0) return;
-
+  // Writes the queued rows in one request and throws so the caller can retry.
+  const sendDealsToD1 = async (dealsToSave: CustomerDeal[]) => {
     const payloadFor = (deal: CustomerDeal) => ({
       lineUserId: deal.lineUserId,
       status: deal.status,
@@ -311,25 +334,65 @@ export default function App() {
       product: deal.product,
     });
 
-    try {
-      const res = await callDealsApi(
-        'PUT',
-        dealsToSave.map((deal) => deal.lineUserId),
-        dealsToSave.length === 1
-          ? payloadFor(dealsToSave[0])
-          : { edits: dealsToSave.map(payloadFor) }
-      );
+    const res = await callDealsApi(
+      'PUT',
+      dealsToSave.map((deal) => deal.lineUserId),
+      dealsToSave.length === 1
+        ? payloadFor(dealsToSave[0])
+        : { edits: dealsToSave.map(payloadFor) }
+    );
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        showToast(data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ', 'error');
-        return;
-      }
-      clearPendingSave(dealsToSave.map((deal) => deal.id));
-    } catch (err) {
-      console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
-      showToast('บันทึกการแก้ไขลง D1 ไม่สำเร็จ', 'error');
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ');
     }
+  };
+
+  // One flush at a time; edits made during a save wait for the next round.
+  const flushPendingSaves = async () => {
+    if (savingRef.current) return;
+    savingRef.current = true;
+
+    try {
+      while (saveQueueRef.current.size > 0) {
+        const batch = [...saveQueueRef.current.values()];
+        saveQueueRef.current.clear();
+
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            await sendDealsToD1(batch);
+            clearPendingSave(batch.map((deal) => deal.id));
+            break;
+          } catch (err) {
+            if (attempt >= SAVE_RETRY_DELAYS_MS.length) {
+              // Keep the rows pending so the next edit retries them together.
+              batch.forEach((deal) => saveQueueRef.current.set(deal.id, deal));
+              console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
+              showToast(
+                err instanceof Error ? err.message : 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ',
+                'error'
+              );
+              return;
+            }
+            await wait(SAVE_RETRY_DELAYS_MS[attempt]);
+          }
+        }
+      }
+    } finally {
+      savingRef.current = false;
+    }
+  };
+
+  // Debounced: rapid edits collapse into one request instead of one per keystroke.
+  const queueDealsSave = (dealsToSave: CustomerDeal[]) => {
+    if (dealsToSave.length === 0) return;
+    dealsToSave.forEach((deal) => saveQueueRef.current.set(deal.id, deal));
+
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      flushPendingSaves();
+    }, SAVE_DEBOUNCE_MS);
   };
 
   /**
@@ -352,7 +415,7 @@ export default function App() {
 
     if (persist) {
       markPendingSave(updatedDeals.map((deal) => deal.id));
-      saveDealsToD1(updatedDeals);
+      queueDealsSave(updatedDeals);
     } else {
       added.forEach((deal) => localOnlyIdsRef.current.add(deal.id));
     }
@@ -378,7 +441,10 @@ export default function App() {
       }
 
       clearPendingSave(dealsToReset.map((deal) => deal.id));
-      dealsToReset.forEach((deal) => localOnlyIdsRef.current.delete(deal.id));
+      dealsToReset.forEach((deal) => {
+        saveQueueRef.current.delete(deal.id);
+        localOnlyIdsRef.current.delete(deal.id);
+      });
       await loadDeals(dashboardToken);
       showToast(`รีเซ็ต ${dealsToReset.length} ดีลกลับเป็นค่าล่าสุดจาก LINE แล้ว`, 'success');
     } catch (err) {
@@ -888,7 +954,7 @@ export default function App() {
             กรอกรหัสผู้ดูแล (DASHBOARD_TOKEN) เพื่ออ่านข้อมูลจริง รหัสจะถูกเก็บไว้ในเบราว์เซอร์นี้เท่านั้น
           </p>
 
-          <HealthBadge health={health} />
+          <HealthBadge health={health} onRefresh={refreshHealth} isChecking={isCheckingHealth} />
 
           <input
             type="password"
@@ -959,7 +1025,7 @@ export default function App() {
         dealsError ||
         pendingSaveCount > 0) && (
         <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 space-y-2">
-          <HealthBadge health={health} />
+          <HealthBadge health={health} onRefresh={refreshHealth} isChecking={isCheckingHealth} />
           {dealsError && (
             <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/30 text-xs text-rose-200 flex flex-wrap items-center justify-between gap-2">
               <span className="flex items-center gap-2">
