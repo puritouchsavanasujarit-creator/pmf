@@ -219,6 +219,24 @@ res = await worker.fetch(
 );
 check('POST deal subpath -> 405', res.status === 405, `status=${res.status}`);
 
+// --- Health ---
+res = await worker.fetch(new Request(`${base}/api/health`), env);
+const health = await res.json();
+check('health -> 200', res.status === 200, `status=${res.status}`);
+check(
+  'health reports both secrets as set',
+  health.dashboardToken === 'set' && health.lineChannelSecret === 'set',
+  JSON.stringify(health)
+);
+check(
+  'health leaks no secret value',
+  !JSON.stringify(health).includes(DASHBOARD_TOKEN) &&
+    !JSON.stringify(health).includes(CHANNEL_SECRET),
+  JSON.stringify(health)
+);
+res = await worker.fetch(new Request(`${base}/api/health`, { method: 'POST' }), env);
+check('health POST -> 405', res.status === 405, `status=${res.status}`);
+
 // --- Static ---
 res = await worker.fetch(new Request(`${base}/`), env);
 check('GET / -> 200 html', res.status === 200 && (await res.text()).includes('app'));

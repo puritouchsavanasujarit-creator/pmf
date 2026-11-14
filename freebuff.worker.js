@@ -17,6 +17,7 @@ import {
 
 const WEBHOOK_PATH = '/api/line/webhook';
 const DEALS_PATH = '/api/deals';
+const HEALTH_PATH = '/api/health';
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS deal_events (
@@ -481,9 +482,32 @@ export async function handleDealsReset(request, env, lineUserId) {
   }
 }
 
+/**
+ * Presence check for the Worker's secrets: reports whether each one is visible
+ * without ever returning its value.
+ */
+function handleHealth(request, env) {
+  if (request.method !== 'GET') {
+    return json({ success: false, error: 'Method not allowed' }, 405);
+  }
+
+  const hasDashboardToken = Boolean(env?.DASHBOARD_TOKEN);
+  const hasChannelSecret = Boolean(env?.LINE_CHANNEL_SECRET);
+
+  return json({
+    success: hasDashboardToken && hasChannelSecret,
+    dashboardToken: hasDashboardToken ? 'set' : 'missing',
+    lineChannelSecret: hasChannelSecret ? 'set' : 'missing',
+  });
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+
+    if (url.pathname === HEALTH_PATH || url.pathname === `${HEALTH_PATH}/`) {
+      return handleHealth(request, env);
+    }
 
     if (url.pathname === WEBHOOK_PATH || url.pathname === `${WEBHOOK_PATH}/`) {
       return handleLineWebhook(request, env);
