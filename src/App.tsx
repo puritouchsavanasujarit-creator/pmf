@@ -67,6 +67,19 @@ const SAVE_RETRY_LATER_MS = 15000;
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+// 401/403/503 will not fix themselves; network errors and other 5xx can.
+const isRetryableStatus = (status: number) =>
+  status === 408 || status === 429 || (status >= 500 && status !== 503);
+
+class SaveFailure extends Error {
+  readonly retryable: boolean;
+
+  constructor(message: string, retryable: boolean) {
+    super(message);
+    this.retryable = retryable;
+  }
+}
+
 export default function App() {
   // Auth state
   const [user, setUser] = useState<User | null>(null);
@@ -92,6 +105,8 @@ export default function App() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savingRef = useRef(false);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveBlockedRef = useRef(false);
+  const saveNotifiedRef = useRef(false);
   const localOnlyIdsRef = useRef<Set<string>>(new Set());
   const [pendingSaveCount, setPendingSaveCount] = useState(0);
 
@@ -346,13 +361,30 @@ export default function App() {
 
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ');
+      throw new SaveFailure(
+        data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ',
+        isRetryableStatus(res.status)
+      );
     }
+  };
+
+  // One toast per outage: repeated attempts must not repeat the same message.
+  const notifySaveFailure = (message: string) => {
+    if (saveNotifiedRef.current) return;
+    saveNotifiedRef.current = true;
+    showToast(message, 'error');
+  };
+
+  // A newer edit wins: only restore rows the queue does not already hold.
+  const restoreQueued = (batch: CustomerDeal[]) => {
+    batch.forEach((deal) => {
+      if (!saveQueueRef.current.has(deal.id)) saveQueueRef.current.set(deal.id, deal);
+    });
   };
 
   // One flush at a time; edits made during a save wait for the next round.
   const flushPendingSaves = async () => {
-    if (savingRef.current) return;
+    if (savingRef.current || saveBlockedRef.current) return;
     if (!navigator.onLine) {
       scheduleRetry();
       return;
@@ -368,22 +400,30 @@ export default function App() {
           try {
             await sendDealsToD1(batch);
             clearPendingSave(batch.map((deal) => deal.id));
+            saveNotifiedRef.current = false;
             break;
           } catch (err) {
-            if (attempt >= SAVE_RETRY_DELAYS_MS.length) {
-              // An edit made during the save wins: only restore rows the queue lost.
-              batch.forEach((deal) => {
-                if (!saveQueueRef.current.has(deal.id)) saveQueueRef.current.set(deal.id, deal);
-              });
-              console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
-              showToast(
-                err instanceof Error ? err.message : 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ',
-                'error'
-              );
-              scheduleRetry();
-              return;
+            const retryable = !(err instanceof SaveFailure) || err.retryable;
+            if (retryable && attempt < SAVE_RETRY_DELAYS_MS.length) {
+              await wait(SAVE_RETRY_DELAYS_MS[attempt]);
+              continue;
             }
-            await wait(SAVE_RETRY_DELAYS_MS[attempt]);
+
+            // Stop for now: either the error is permanent or retries ran out.
+            const message =
+              err instanceof Error ? err.message : 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ';
+            console.error('บันทึกการแก้ไขลง D1 ไม่สำเร็จ:', err);
+
+            restoreQueued(batch);
+            notifySaveFailure(message);
+
+            if (retryable) {
+              scheduleRetry();
+            } else {
+              // Rows stay pending for the next edit; no automatic retries for them.
+              saveBlockedRef.current = true;
+            }
+            return;
           }
         }
       }
@@ -396,6 +436,7 @@ export default function App() {
   const queueDealsSave = (dealsToSave: CustomerDeal[]) => {
     if (dealsToSave.length === 0) return;
     dealsToSave.forEach((deal) => saveQueueRef.current.set(deal.id, deal));
+    saveBlockedRef.current = false;
 
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
@@ -414,6 +455,9 @@ export default function App() {
   };
 
   useEffect(() => {
+    // A new token can fix a 401/403, so blocked rows get another chance.
+    saveBlockedRef.current = false;
+
     const onOnline = () => {
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
