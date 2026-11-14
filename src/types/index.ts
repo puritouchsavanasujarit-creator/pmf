@@ -18,6 +18,8 @@ export interface CustomerDeal {
   sheetRow?: number;
   notes: string;
   phone?: string;
+  // D1 revision of the saved override; 0 means no override yet.
+  revision?: number;
 }
 
 export interface LineWebhookConfig {

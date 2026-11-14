@@ -41,7 +41,8 @@ const SCHEMA_STATEMENTS = [
      notes TEXT,
      admin_name TEXT,
      product TEXT,
-     updated_at TEXT NOT NULL
+     updated_at TEXT NOT NULL,
+     revision INTEGER NOT NULL DEFAULT 1
    )`,
 ];
 
@@ -52,12 +53,25 @@ let schemaPromise = null;
 
 function ensureSchema(env) {
   if (!schemaPromise) {
-    schemaPromise = env.DB.batch(SCHEMA_STATEMENTS.map((sql) => env.DB.prepare(sql))).catch((err) => {
-      schemaPromise = null;
-      throw err;
-    });
+    schemaPromise = env.DB.batch(SCHEMA_STATEMENTS.map((sql) => env.DB.prepare(sql)))
+      .then(() => addRevisionColumn(env))
+      .catch((err) => {
+        schemaPromise = null;
+        throw err;
+      });
   }
   return schemaPromise;
+}
+
+// Databases created before conflict detection need the revision column added.
+async function addRevisionColumn(env) {
+  try {
+    await env.DB.prepare(
+      'ALTER TABLE deal_overrides ADD COLUMN revision INTEGER NOT NULL DEFAULT 1'
+    ).run();
+  } catch {
+    // Already present.
+  }
 }
 
 function safeEqual(a, b) {
@@ -181,6 +195,7 @@ function toDeal(row) {
     syncedToSheet: false,
     syncedAt: null,
     notes: row.override_notes ?? '',
+    revision: row.override_revision ?? 0,
   };
 }
 
@@ -196,6 +211,7 @@ async function listDeals(env) {
        o.admin_name AS override_admin_name,
        o.product AS override_product,
        o.updated_at AS override_updated_at,
+       o.revision AS override_revision,
        (SELECT a.amount FROM deal_events a
          WHERE a.line_user_id = d.line_user_id AND a.amount IS NOT NULL
          ORDER BY a.created_at DESC, a.id DESC LIMIT 1) AS latest_amount
@@ -337,8 +353,8 @@ function normalizeDealEdit(body) {
 }
 
 const OVERRIDE_UPSERT = `INSERT INTO deal_overrides
-     (line_user_id, status, tags, amount, notes, admin_name, product, updated_at)
-   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     (line_user_id, status, tags, amount, notes, admin_name, product, updated_at, revision)
+   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
    ON CONFLICT(line_user_id) DO UPDATE SET
      status = excluded.status,
      tags = excluded.tags,
@@ -346,14 +362,31 @@ const OVERRIDE_UPSERT = `INSERT INTO deal_overrides
      notes = excluded.notes,
      admin_name = excluded.admin_name,
      product = excluded.product,
-     updated_at = excluded.updated_at`;
+     updated_at = excluded.updated_at,
+     revision = deal_overrides.revision + 1
+   WHERE deal_overrides.revision = ?`;
 
-async function upsertOverrides(env, entries) {
+async function currentRevisions(env, lineUserIds) {
+  if (lineUserIds.length === 0) return new Map();
+
+  const placeholders = lineUserIds.map(() => '?').join(', ');
+  const { results } = await env.DB.prepare(
+    `SELECT line_user_id, revision FROM deal_overrides WHERE line_user_id IN (${placeholders})`
+  )
+    .bind(...lineUserIds)
+    .all();
+
+  return new Map((results || []).map((row) => [row.line_user_id, row.revision]));
+}
+
+async function upsertOverrides(env, entries, revisions) {
   await ensureSchema(env);
   const updatedAt = new Date().toISOString();
+
   await env.DB.batch(
-    entries.map((entry) =>
-      env.DB.prepare(OVERRIDE_UPSERT).bind(
+    entries.map((entry) => {
+      const current = revisions.get(entry.lineUserId) ?? 0;
+      return env.DB.prepare(OVERRIDE_UPSERT).bind(
         entry.lineUserId,
         entry.fields.status,
         entry.fields.tags,
@@ -361,9 +394,11 @@ async function upsertOverrides(env, entries) {
         entry.fields.notes,
         entry.fields.adminName,
         entry.fields.product,
-        updatedAt
-      )
-    )
+        updatedAt,
+        current + 1,
+        current
+      );
+    })
   );
 }
 
@@ -385,7 +420,12 @@ function parseEdits(body, singleLineUserId) {
     if (!lineUserId) return { error: 'ไม่พบรหัสลูกค้า LINE' };
     const normalized = normalizeDealEdit(edit);
     if (normalized.error) return { error: normalized.error };
-    entries.push({ lineUserId, fields: normalized.fields });
+    const revision = Number(edit?.revision);
+    entries.push({
+      lineUserId,
+      fields: normalized.fields,
+      revision: Number.isInteger(revision) && revision >= 0 ? revision : 0,
+    });
   }
   return { entries };
 }
@@ -416,8 +456,31 @@ export async function handleDealsWrite(request, env, lineUserId) {
   }
 
   try {
-    await upsertOverrides(env, parsed.entries);
-    return json({ success: true, saved: parsed.entries.length });
+    await ensureSchema(env);
+    const revisions = await currentRevisions(env, parsed.entries.map((entry) => entry.lineUserId));
+
+    // Someone saved after this client read the deal: report the current revisions.
+    const conflicts = parsed.entries
+      .filter((entry) => entry.revision !== (revisions.get(entry.lineUserId) ?? 0))
+      .map((entry) => ({
+        lineUserId: entry.lineUserId,
+        revision: revisions.get(entry.lineUserId) ?? 0,
+      }));
+
+    if (conflicts.length > 0) {
+      return json({ success: false, error: 'มีคนอื่นแก้ดีลนี้ไปแล้ว', conflicts }, 409);
+    }
+
+    await upsertOverrides(env, parsed.entries, revisions);
+
+    return json({
+      success: true,
+      saved: parsed.entries.length,
+      revisions: parsed.entries.map((entry) => ({
+        lineUserId: entry.lineUserId,
+        revision: (revisions.get(entry.lineUserId) ?? 0) + 1,
+      })),
+    });
   } catch (err) {
     console.error('Failed to save deal overrides:', err);
     return json({ success: false, error: 'ไม่สามารถบันทึกการแก้ไขลงฐานข้อมูลได้' }, 500);

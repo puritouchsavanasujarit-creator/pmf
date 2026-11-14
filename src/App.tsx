@@ -89,12 +89,19 @@ function loadQueuedDeals(): Map<string, CustomerDeal> {
   }
 }
 
+interface SaveRevision {
+  lineUserId: string;
+  revision: number;
+}
+
 class SaveFailure extends Error {
   readonly retryable: boolean;
+  readonly conflicts: SaveRevision[];
 
-  constructor(message: string, retryable: boolean) {
+  constructor(message: string, retryable: boolean, conflicts: SaveRevision[] = []) {
     super(message);
     this.retryable = retryable;
+    this.conflicts = conflicts;
   }
 }
 
@@ -407,6 +414,7 @@ export default function App() {
       notes: deal.notes,
       adminName: deal.adminName,
       product: deal.product,
+      revision: deal.revision ?? 0,
     });
 
     const res = await callDealsApi(
@@ -417,13 +425,23 @@ export default function App() {
         : { edits: dealsToSave.map(payloadFor) }
     );
 
+    const data = await res.json().catch(() => ({}));
+
     if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
+      if (res.status === 409) {
+        throw new SaveFailure(
+          data.error || 'มีคนอื่นแก้ไขดีลนี้ไปแล้ว',
+          false,
+          Array.isArray(data.conflicts) ? data.conflicts : []
+        );
+      }
       throw new SaveFailure(
         data.error || 'บันทึกการแก้ไขลง D1 ไม่สำเร็จ',
         isRetryableStatus(res.status)
       );
     }
+
+    return Array.isArray(data.revisions) ? (data.revisions as SaveRevision[]) : [];
   };
 
   // One toast per outage: repeated attempts must not repeat the same message.
@@ -456,12 +474,20 @@ export default function App() {
 
         for (let attempt = 0; ; attempt += 1) {
           try {
-            await sendDealsToD1(batch);
+            applyRevisions(await sendDealsToD1(batch));
             clearPendingSave(batch.map((deal) => deal.id));
             persistQueue();
             saveNotifiedRef.current = false;
             break;
           } catch (err) {
+            if (err instanceof SaveFailure && err.conflicts.length > 0) {
+              restoreQueued(batch);
+              persistQueue();
+              saveBlockedRef.current = true;
+              askOverwrite(err.conflicts);
+              return;
+            }
+
             const retryable = !(err instanceof SaveFailure) || err.retryable;
             if (retryable && attempt < SAVE_RETRY_DELAYS_MS.length) {
               await wait(SAVE_RETRY_DELAYS_MS[attempt]);
@@ -490,6 +516,38 @@ export default function App() {
     } finally {
       savingRef.current = false;
     }
+  };
+
+  // Adopt the revision D1 assigned, otherwise our next write looks stale.
+  const applyRevisions = (revisions: SaveRevision[]) => {
+    if (revisions.length === 0) return;
+
+    const byUser = new Map(revisions.map((item) => [item.lineUserId, item.revision]));
+    const withRevision = (deal: CustomerDeal) => {
+      const revision = byUser.get(deal.lineUserId);
+      return revision === undefined ? deal : { ...deal, revision };
+    };
+
+    saveQueueRef.current.forEach((deal, id) => saveQueueRef.current.set(id, withRevision(deal)));
+    setDeals((prev) => prev.map(withRevision));
+  };
+
+  // Another admin saved first: let this one decide before replacing their values.
+  const askOverwrite = (conflicts: SaveRevision[]) => {
+    setConfirmation({
+      isOpen: true,
+      title: 'มีคนอื่นแก้ดีลนี้ไปแล้ว',
+      message: `ดีล ${conflicts.length} รายการถูกแก้ไขหลังจากที่คุณเปิดหน้านี้ การเขียนทับจะแทนที่ค่าล่าสุดของอีกฝ่าย ต้องการดำเนินการต่อหรือไม่?`,
+      confirmText: 'เขียนทับ',
+      isDestructive: true,
+      onConfirm: () => {
+        closeConfirmation();
+        saveBlockedRef.current = false;
+        applyRevisions(conflicts);
+        persistQueue();
+        flushPendingSaves();
+      },
+    });
   };
 
   // Debounced: rapid edits collapse into one request instead of one per keystroke.
