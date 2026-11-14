@@ -38,6 +38,7 @@ import { ConfirmationModal } from './components/ConfirmationModal';
 import { AnalyticsModal } from './components/AnalyticsModal';
 import { LostRecoveryModal } from './components/LostRecoveryModal';
 import { AdminManagementModal } from './components/AdminManagementModal';
+import { HealthBadge, HealthStatus } from './components/HealthBadge';
 import { exportDealsToCsv } from './utils/exportCsv';
 import { 
   CheckCircle2, 
@@ -75,6 +76,7 @@ export default function App() {
     () => localStorage.getItem(DASHBOARD_TOKEN_KEY) || ''
   );
   const [tokenInput, setTokenInput] = useState('');
+  const [health, setHealth] = useState<HealthStatus | null>(null);
   const [dealsError, setDealsError] = useState<string | null>(null);
 
   // Rows with edits still waiting for D1, and rows D1 does not know yet (simulator).
@@ -156,6 +158,14 @@ export default function App() {
 
   const closeConfirmation = () =>
     setConfirmation((prev) => ({ ...prev, isOpen: false }));
+
+  // Public endpoint: tells us whether the Worker sees both secrets, without values.
+  useEffect(() => {
+    fetch('/api/health')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: HealthStatus | null) => setHealth(data))
+      .catch(() => setHealth(null));
+  }, []);
 
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
     setToast({ message, type });
@@ -878,6 +888,8 @@ export default function App() {
             กรอกรหัสผู้ดูแล (DASHBOARD_TOKEN) เพื่ออ่านข้อมูลจริง รหัสจะถูกเก็บไว้ในเบราว์เซอร์นี้เท่านั้น
           </p>
 
+          <HealthBadge health={health} />
+
           <input
             type="password"
             value={tokenInput}
@@ -941,9 +953,13 @@ export default function App() {
         onOpenAdminManagement={() => setIsAdminsOpen(true)}
       />
 
-      {/* Notices: API/token errors and unsaved local edits */}
-      {(dealsError || pendingSaveCount > 0) && (
+      {/* Notices: Worker config, API/token errors and unsaved local edits */}
+      {(health?.dashboardToken === 'missing' ||
+        health?.lineChannelSecret === 'missing' ||
+        dealsError ||
+        pendingSaveCount > 0) && (
         <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 space-y-2">
+          <HealthBadge health={health} />
           {dealsError && (
             <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/30 text-xs text-rose-200 flex flex-wrap items-center justify-between gap-2">
               <span className="flex items-center gap-2">
