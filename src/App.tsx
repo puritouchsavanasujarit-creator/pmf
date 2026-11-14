@@ -305,7 +305,32 @@ export default function App() {
     }
   }, []);
 
+  const clearSaveTimers = () => {
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    saveTimerRef.current = null;
+    retryTimerRef.current = null;
+  };
+
+  // Manual retry: clears the block left by a 401/403/503 and flushes now.
+  const retrySavesNow = () => {
+    saveBlockedRef.current = false;
+    saveNotifiedRef.current = false;
+    clearSaveTimers();
+
+    if (saveQueueRef.current.size === 0) {
+      showToast('ไม่มีรายการที่รอส่งในขณะนี้', 'info');
+      return;
+    }
+    flushPendingSaves();
+  };
+
   const discardLocalEdits = () => {
+    // Drop the queue too, otherwise a pending flush would save what was discarded.
+    saveQueueRef.current.clear();
+    saveBlockedRef.current = false;
+    clearSaveTimers();
+
     pendingSaveIdsRef.current.clear();
     localOnlyIdsRef.current.clear();
     setPendingSaveCount(0);
@@ -459,10 +484,7 @@ export default function App() {
     saveBlockedRef.current = false;
 
     const onOnline = () => {
-      if (retryTimerRef.current) {
-        clearTimeout(retryTimerRef.current);
-        retryTimerRef.current = null;
-      }
+      clearSaveTimers();
       flushPendingSaves();
     };
 
@@ -1126,12 +1148,21 @@ export default function App() {
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 มีการแก้ไขบนหน้าจอ {pendingSaveCount} รายการที่ยังบันทึกลง D1 ไม่สำเร็จ — รีเฟรชอัตโนมัติจะไม่ทับรายการเหล่านี้
               </span>
-              <button
-                onClick={discardLocalEdits}
-                className="px-2 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 font-medium"
-              >
-                ทิ้งการแก้ไขและโหลดใหม่
-              </button>
+              <span className="flex items-center gap-2">
+                <button
+                  onClick={retrySavesNow}
+                  className="px-2 py-1 rounded-md bg-amber-500/30 hover:bg-amber-500/40 border border-amber-500/50 font-semibold"
+                  title="ปลดบล็อกและลองบันทึกลง D1 อีกครั้ง"
+                >
+                  ลองอีกครั้ง
+                </button>
+                <button
+                  onClick={discardLocalEdits}
+                  className="px-2 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 font-medium"
+                >
+                  ทิ้งการแก้ไขและโหลดใหม่
+                </button>
+              </span>
             </div>
           )}
         </div>
