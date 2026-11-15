@@ -1,4 +1,4 @@
-import { AdminUser } from '../types';
+import { AdminUser, CustomerDeal } from '../types';
 
 export const DEFAULT_ADMINS: AdminUser[] = [
   {
@@ -31,3 +31,114 @@ export const DEFAULT_ADMINS: AdminUser[] = [
 ];
 
 export { DEFAULT_TAG_RULES, determineStatusFromTags } from '../../shared/tagRules.js';
+
+export function createStarterDemoDeals(): CustomerDeal[] {
+  const now = Date.now();
+  const daysAgo = (days: number) => new Date(now - days * 86_400_000).toISOString();
+
+  return [
+    {
+      id: 'demo-1',
+      lineUserId: 'U9012A1B2C3',
+      displayName: 'คุณสมชาย ใจดี',
+      pictureUrl: '',
+      status: 'WON',
+      tags: ['#ปิดการขาย', '#โอนแล้ว', '#ลูกค้าVIP'],
+      amount: 12900,
+      product: 'คอร์สยิงแอด + ระบบ CRM 1 ปี',
+      adminName: 'แอดมินแนน',
+      lastMessage: 'โอนยอด 12,900 เรียบร้อยครับ ส่งสลิปให้แล้ว #ปิดการขาย #โอนแล้ว',
+      lastMessageTime: '15 นาทีที่แล้ว',
+      updatedAt: daysAgo(0),
+      syncedToSheet: false,
+      syncedAt: null,
+      notes: 'ออกใบกำกับภาษีในนามบริษัท ส่งอีเมลแล้ว',
+    },
+    {
+      id: 'demo-2',
+      lineUserId: 'U9012D4E5F6',
+      displayName: 'คุณนภัสสร คลินิกความงาม',
+      pictureUrl: '',
+      status: 'LOST',
+      tags: ['#ขายไม่เสร็จ', '#แพงไป', '#รอตัดสินใจ'],
+      amount: 25000,
+      product: 'แพ็กเกจ Enterprise LINE Sync',
+      adminName: 'แอดมินบอย',
+      lastMessage: 'ขอปรึกษาหุ้นส่วนก่อนนะคะ ช่วงนี้งบยังตึงอยู่ #ขายไม่เสร็จ #แพงไป',
+      lastMessageTime: '2 ชั่วโมงที่แล้ว',
+      updatedAt: daysAgo(1),
+      syncedToSheet: false,
+      syncedAt: null,
+      notes: 'เสนอโปรผ่อน 0% 3 เดือน รอติดตามซ้ำวันศุกร์',
+    },
+    {
+      id: 'demo-3',
+      lineUserId: 'U9012G7H8I9',
+      displayName: 'คุณกิตติพงษ์ ร้านกาแฟ',
+      pictureUrl: '',
+      status: 'IN_PROGRESS',
+      tags: ['#กำลังติดตาม', '#ขอใบเสนอราคา', '#สนใจ'],
+      amount: 6500,
+      product: 'แพ็กเกจ POS + LINE แจ้งเตือนยอดขาย',
+      adminName: 'แอดมินเก่ง',
+      lastMessage: 'รบกวนส่งใบเสนอราคาเข้า LINE นี้ได้เลยครับ #ขอใบเสนอราคา',
+      lastMessageTime: '4 ชั่วโมงที่แล้ว',
+      updatedAt: daysAgo(2),
+      syncedToSheet: false,
+      syncedAt: null,
+      notes: 'ส่ง PDF ใบเสนอราคาแล้ว รอลูกค้าคอนเฟิร์ม',
+    },
+    {
+      id: 'demo-4',
+      lineUserId: 'U9012J1K2L3',
+      displayName: 'คุณแพรวา บิวตี้ช็อป',
+      pictureUrl: '',
+      status: 'WON',
+      tags: ['#ปิดการขาย', '#โอนแล้ว'],
+      amount: 4900,
+      product: 'แพ็กเกจ Starter รายปี',
+      adminName: 'แอดมินแนน',
+      lastMessage: 'เรียบร้อยค่ะ ขอบคุณที่ดูแลดีมาก #ปิดการขาย',
+      lastMessageTime: '3 วันที่แล้ว',
+      updatedAt: daysAgo(3),
+      syncedToSheet: false,
+      syncedAt: null,
+      notes: 'ลูกค้าต่ออายุปีที่ 2',
+    },
+    {
+      id: 'demo-5',
+      lineUserId: 'U9012M4N5O6',
+      displayName: 'คุณธนกร ออโต้พาร์ท',
+      pictureUrl: '',
+      status: 'LOST',
+      tags: ['#ขายไม่เสร็จ', '#ไม่ตอบแชท'],
+      amount: 9800,
+      product: 'ระบบจัดการสต็อกและแท็กลูกค้า',
+      adminName: 'แอดมินบอย',
+      lastMessage: 'เดี๋ยวทักกลับนะครับ #ไม่ตอบแชท',
+      lastMessageTime: '6 วันที่แล้ว',
+      updatedAt: daysAgo(6),
+      syncedToSheet: false,
+      syncedAt: null,
+      notes: 'ทักซ้ำรอบแรกแล้วยังไม่อ่าน แนะนำใช้ข้อความกู้คืนเคส',
+    },
+    {
+      id: 'demo-6',
+      lineUserId: 'U9012P7Q8R9',
+      displayName: 'คุณอรุณี เบเกอรี่เฮาส์',
+      pictureUrl: '',
+      status: 'UNTAGGED',
+      tags: [],
+      amount: 0,
+      product: '',
+      adminName: 'ยังไม่มีแอดมินรับเรื่อง',
+      lastMessage: 'สวัสดีค่ะ สนใจสอบถามระบบเชื่อมต่อ Google Sheets ค่ะ',
+      lastMessageTime: '10 นาทีที่แล้ว',
+      updatedAt: daysAgo(0),
+      syncedToSheet: false,
+      syncedAt: null,
+      notes: '',
+    },
+  ];
+}
+

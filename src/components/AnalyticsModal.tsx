@@ -11,6 +11,7 @@ import {
   DollarSign 
 } from 'lucide-react';
 import { CustomerDeal, TagRule } from '../types';
+import { TagStatusHeatmap } from './TagStatusHeatmap';
 
 interface AnalyticsModalProps {
   isOpen: boolean;
@@ -83,7 +84,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-3xl max-h-[90vh] overflow-y-auto p-6 shadow-2xl text-slate-200">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto p-6 shadow-2xl text-slate-200">
         
         {/* Header */}
         <div className="flex items-center justify-between pb-4 border-b border-slate-800">
@@ -175,6 +176,9 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
             </div>
           )}
         </div>
+
+        {/* 30-Day Tag Frequency × Deal Status Heatmap */}
+        <TagStatusHeatmap deals={deals} tagRules={tagRules} />
 
         {/* 2 Columns: Reasons for Lost Deals vs Admin Leaderboard */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">

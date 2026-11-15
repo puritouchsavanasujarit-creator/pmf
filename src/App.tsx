@@ -18,7 +18,8 @@ import {
 import { 
   DEFAULT_TAG_RULES, 
   determineStatusFromTags,
-  DEFAULT_ADMINS
+  DEFAULT_ADMINS,
+  createStarterDemoDeals
 } from './services/lineService';
 import { 
   createTrackingSpreadsheet, 
@@ -44,10 +45,11 @@ import {
   CheckCircle2, 
   AlertCircle, 
   Zap, 
-  Bot, 
   FileSpreadsheet, 
-  Sparkles,
-  Lock
+  Lock,
+  MonitorPlay,
+  Database,
+  RotateCcw
 } from 'lucide-react';
 
 const STORAGE_KEYS = {
@@ -58,7 +60,20 @@ const STORAGE_KEYS = {
   AUTO_SYNC: 'line_oa_auto_sync_v1',
   ADMINS: 'line_oa_admins_v1',
   SAVE_QUEUE: 'line_oa_save_queue_v1',
+  LOCAL_MODE: 'line_oa_local_mode_v1',
+  LOCAL_DEALS: 'line_oa_local_deals_v1',
 };
+
+function loadLocalDeals(): CustomerDeal[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.LOCAL_DEALS);
+    if (!raw) return createStarterDemoDeals();
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : createStarterDemoDeals();
+  } catch {
+    return createStarterDemoDeals();
+  }
+}
 
 const DASHBOARD_TOKEN_KEY = 'line_oa_dashboard_token_v1';
 const HEALTH_POLL_MS = 60000;
@@ -112,8 +127,14 @@ export default function App() {
   const [needsAuth, setNeedsAuth] = useState(true);
 
   // App core state
-  // Real deal data lives in D1 and is loaded from the Worker API (see the effect below).
-  const [deals, setDeals] = useState<CustomerDeal[]>([]);
+  const [isLocalMode, setIsLocalMode] = useState<boolean>(
+    () => localStorage.getItem(STORAGE_KEYS.LOCAL_MODE) === 'true'
+  );
+
+  // Real deal data lives in D1 and is loaded from the Worker API (or localStorage in Local Mode).
+  const [deals, setDeals] = useState<CustomerDeal[]>(() =>
+    localStorage.getItem(STORAGE_KEYS.LOCAL_MODE) === 'true' ? loadLocalDeals() : []
+  );
 
   // Admin token for the private deals API (kept in this browser, sent as a Bearer header).
   const [dashboardToken, setDashboardToken] = useState<string>(
@@ -270,6 +291,15 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.ADMINS, JSON.stringify(admins));
   }, [admins]);
+
+  useEffect(() => {
+    if (!isLocalMode) return;
+    try {
+      localStorage.setItem(STORAGE_KEYS.LOCAL_DEALS, JSON.stringify(deals));
+    } catch (err) {
+      console.error('บันทึกข้อมูลโหมดเบราว์เซอร์ไม่สำเร็จ:', err);
+    }
+  }, [deals, isLocalMode]);
 
   // Auth initialization
   useEffect(() => {
@@ -460,7 +490,7 @@ export default function App() {
 
   // One flush at a time; edits made during a save wait for the next round.
   const flushPendingSaves = async () => {
-    if (savingRef.current || saveBlockedRef.current) return;
+    if (isLocalMode || !dashboardToken || savingRef.current || saveBlockedRef.current) return;
     if (!navigator.onLine) {
       scheduleRetry();
       return;
@@ -574,6 +604,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (isLocalMode) return;
     // A new token can fix a 401/403, so blocked rows get another chance.
     saveBlockedRef.current = false;
 
@@ -584,18 +615,16 @@ export default function App() {
 
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
-  }, [dashboardToken]);
+  }, [dashboardToken, isLocalMode]);
 
   // Rows restored from the previous session go out as soon as we have a token.
   useEffect(() => {
-    if (dashboardToken && saveQueueRef.current.size > 0) flushPendingSaves();
-  }, [dashboardToken]);
+    if (!isLocalMode && dashboardToken && saveQueueRef.current.size > 0) flushPendingSaves();
+  }, [dashboardToken, isLocalMode]);
 
   /**
    * Single entry point for edits: updates the screen, protects the rows from the
-   * background refresh, and persists to D1 in one request. Saved edits count as
-   * pending until the write succeeds; rows D1 does not know yet (simulator) are
-   * kept locally without counting as unsaved work.
+   * background refresh, and persists to D1 in one request (or localStorage in Local Mode).
    */
   const applyDealsEdit = (updatedDeals: CustomerDeal[], { persist = true } = {}) => {
     if (updatedDeals.length === 0) return;
@@ -609,6 +638,8 @@ export default function App() {
       return added.length > 0 ? [...added, ...updated] : updated;
     });
 
+    if (isLocalMode) return;
+
     if (persist) {
       markPendingSave(updatedDeals.map((deal) => deal.id));
       queueDealsSave(updatedDeals);
@@ -620,6 +651,22 @@ export default function App() {
   // Drop the saved overrides so the rows fall back to the latest LINE event.
   const resetDealsToLine = async (dealsToReset: CustomerDeal[]) => {
     if (dealsToReset.length === 0) return;
+
+    if (isLocalMode) {
+      const starterByUserId = new Map(createStarterDemoDeals().map((d) => [d.lineUserId, d]));
+      const resetIds = new Set(dealsToReset.map((d) => d.id));
+      setDeals((prev) =>
+        prev.map((deal) => {
+          if (!resetIds.has(deal.id)) return deal;
+          const starter = starterByUserId.get(deal.lineUserId);
+          return starter
+            ? { ...starter, syncedToSheet: deal.syncedToSheet, syncedAt: deal.syncedAt, sheetRow: deal.sheetRow }
+            : { ...deal, status: 'UNTAGGED', tags: [], notes: '', adminName: 'ยังไม่มีแอดมินรับเรื่อง' };
+        })
+      );
+      showToast(`รีเซ็ต ${dealsToReset.length} ดีลเรียบร้อยแล้ว`, 'success');
+      return;
+    }
 
     const lineUserIds = dealsToReset.map((deal) => deal.lineUserId);
 
@@ -653,11 +700,14 @@ export default function App() {
   const confirmResetDeals = (targets: CustomerDeal[]) =>
     setConfirmation({
       isOpen: true,
-      title: 'รีเซ็ตกลับเป็นค่าจาก LINE?',
-      message:
-        targets.length === 1
-          ? `ต้องการลบการแก้ไขของ "${targets[0].displayName}" และคืนค่าเป็นข้อมูลล่าสุดจาก LINE หรือไม่?`
-          : `การแก้ไขที่บันทึกไว้ของทั้ง ${targets.length} ดีลจะถูกลบ และกลับไปใช้ค่าล่าสุดจาก LINE`,
+      title: isLocalMode ? 'รีเซ็ตข้อมูลดีล?' : 'รีเซ็ตกลับเป็นค่าจาก LINE?',
+      message: isLocalMode
+        ? targets.length === 1
+          ? `ต้องการคืนค่าเริ่มต้นของ "${targets[0].displayName}" หรือไม่?`
+          : `ต้องการคืนค่าเริ่มต้นของทั้ง ${targets.length} ดีลในโหมดเบราว์เซอร์หรือไม่?`
+        : targets.length === 1
+        ? `ต้องการลบการแก้ไขของ "${targets[0].displayName}" และคืนค่าเป็นข้อมูลล่าสุดจาก LINE หรือไม่?`
+        : `การแก้ไขที่บันทึกไว้ของทั้ง ${targets.length} ดีลจะถูกลบ และกลับไปใช้ค่าล่าสุดจาก LINE`,
       confirmText: 'รีเซ็ต',
       isDestructive: true,
       onConfirm: () => {
@@ -668,7 +718,7 @@ export default function App() {
 
   // Refresh automatically every 20 seconds and whenever the tab regains focus
   useEffect(() => {
-    if (!dashboardToken) return;
+    if (!dashboardToken || isLocalMode) return;
     loadDeals(dashboardToken);
     const interval = setInterval(() => loadDeals(dashboardToken), 20000);
     const onFocus = () => loadDeals(dashboardToken);
@@ -677,14 +727,39 @@ export default function App() {
       clearInterval(interval);
       window.removeEventListener('focus', onFocus);
     };
-  }, [dashboardToken, loadDeals]);
+  }, [dashboardToken, isLocalMode, loadDeals]);
+
+  const enterLocalMode = () => {
+    localStorage.setItem(STORAGE_KEYS.LOCAL_MODE, 'true');
+    setIsLocalMode(true);
+    setDealsError(null);
+    setDeals((prev) => (prev.length > 0 ? prev : loadLocalDeals()));
+    showToast('เข้าสู่โหมดทดสอบในเบราว์เซอร์แล้ว (สามารถจำลอง LINE และส่งออก Google Sheets ได้ทันที)', 'info');
+  };
+
+  const exitLocalMode = () => {
+    localStorage.removeItem(STORAGE_KEYS.LOCAL_MODE);
+    setIsLocalMode(false);
+    setDeals([]);
+    setDealsError(null);
+  };
+
+  const handleLoadStarterDemoDeals = () => {
+    const starter = createStarterDemoDeals();
+    setDeals(starter);
+    localStorage.setItem(STORAGE_KEYS.LOCAL_DEALS, JSON.stringify(starter));
+    showToast('โหลดข้อมูลลูกค้าตัวอย่าง 6 รายการเรียบร้อยแล้ว', 'success');
+  };
 
   const handleTokenSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     const token = tokenInput.trim();
     if (!token) return;
+    localStorage.removeItem(STORAGE_KEYS.LOCAL_MODE);
+    setIsLocalMode(false);
     localStorage.setItem(DASHBOARD_TOKEN_KEY, token);
     setTokenInput('');
+    setDealsError(null);
     setDashboardToken(token);
   };
 
@@ -1129,48 +1204,79 @@ export default function App() {
   const unsyncedCount = deals.filter((d) => !d.syncedToSheet).length;
   const syncedRowsCount = deals.filter((d) => d.syncedToSheet).length;
 
-  // The dashboard is private: ask for the admin token before showing any deal data.
-  if (!dashboardToken) {
+  // The dashboard is private: ask for the admin token or let the user run Local Demo Mode.
+  if (!dashboardToken && !isLocalMode) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 font-sans">
-        <form
-          onSubmit={handleTokenSubmit}
-          className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl"
-        >
-          <div className="flex items-center gap-3">
-            <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-              <Lock className="w-5 h-5" />
+        <div className="w-full max-w-md bg-slate-900 border border-slate-800 rounded-2xl p-6 space-y-4 shadow-xl">
+          <form onSubmit={handleTokenSubmit} className="space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
+                <Lock className="w-5 h-5" />
+              </div>
+              <div>
+                <h1 className="text-sm font-bold text-white">แดชบอร์ดผู้ดูแล LINE OA Sales</h1>
+                <p className="text-xs text-slate-400">ข้อมูลดีลจาก D1 ถูกจำกัดสิทธิ์ด้วย Token</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-sm font-bold text-white">แดชบอร์ดผู้ดูแล</h1>
-              <p className="text-xs text-slate-400">ข้อมูลดีลจาก D1 ถูกจำกัดสิทธิ์</p>
-            </div>
+
+            <p className="text-xs text-slate-400 leading-relaxed">
+              กรอกรหัสผู้ดูแล (<code className="text-emerald-300">DASHBOARD_TOKEN</code>) เพื่ออ่านข้อมูลจริงจากฐานข้อมูล D1
+            </p>
+
+            <HealthBadge
+              health={health}
+              onRefresh={refreshHealth}
+              isChecking={isCheckingHealth}
+              onUseGeneratedToken={(generated) => setTokenInput(generated)}
+            />
+
+            <input
+              type="password"
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              placeholder="กรอก DASHBOARD_TOKEN..."
+              autoFocus
+              className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+            />
+
+            {dealsError && <p className="text-xs text-rose-400">{dealsError}</p>}
+
+            <button
+              type="submit"
+              disabled={!tokenInput.trim()}
+              className="w-full px-4 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-xs font-semibold shadow-md shadow-emerald-600/30 transition-colors"
+            >
+              เข้าสู่ระบบด้วย Token
+            </button>
+          </form>
+
+          <div className="relative flex py-1 items-center">
+            <div className="flex-grow border-t border-slate-800" />
+            <span className="shrink mx-3 text-[10px] uppercase tracking-wider text-slate-500">หรือ</span>
+            <div className="flex-grow border-t border-slate-800" />
           </div>
 
-          <p className="text-xs text-slate-400 leading-relaxed">
-            กรอกรหัสผู้ดูแล (DASHBOARD_TOKEN) เพื่ออ่านข้อมูลจริง รหัสจะถูกเก็บไว้ในเบราว์เซอร์นี้เท่านั้น
-          </p>
-
-          <HealthBadge health={health} onRefresh={refreshHealth} isChecking={isCheckingHealth} />
-
-          <input
-            type="password"
-            value={tokenInput}
-            onChange={(e) => setTokenInput(e.target.value)}
-            placeholder="DASHBOARD_TOKEN"
-            autoFocus
-            className="w-full px-3 py-2 text-xs bg-slate-950 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-          />
-
-          {dealsError && <p className="text-xs text-rose-400">{dealsError}</p>}
-
-          <button
-            type="submit"
-            className="w-full px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md shadow-emerald-600/30"
-          >
-            เข้าสู่ระบบ
-          </button>
-        </form>
+          <div className="p-3.5 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5">
+            <div className="flex items-start gap-2.5">
+              <MonitorPlay className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+              <div className="text-xs">
+                <p className="font-semibold text-slate-200">ยังไม่ได้ตั้งค่า Worker Secrets?</p>
+                <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                  เข้าใช้งานโหมดเบราว์เซอร์ได้ทันที รองรับการจำลองแชท LINE OA, กฎตรวจจับแท็ก, Analytics และส่งออก Google Sheets จริง
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={enterLocalMode}
+              className="w-full px-4 py-2 rounded-lg bg-sky-600/20 hover:bg-sky-600/30 border border-sky-500/40 text-sky-200 text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+            >
+              <MonitorPlay className="w-4 h-4" />
+              <span>เข้าใช้งานโหมดทดสอบในเบราว์เซอร์ (Local Demo Mode)</span>
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -1216,33 +1322,74 @@ export default function App() {
         onOpenAdminManagement={() => setIsAdminsOpen(true)}
       />
 
-      {/* Notices: Worker config, API/token errors and unsaved local edits */}
-      {(health?.dashboardToken === 'missing' ||
+      {/* Notices: Local mode indicator, Worker config, API/token errors and unsaved local edits */}
+      {(isLocalMode ||
+        health?.dashboardToken === 'missing' ||
         health?.lineChannelSecret === 'missing' ||
         dealsError ||
         pendingSaveCount > 0) && (
         <div className="max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 pt-4 space-y-2">
+          {isLocalMode && (
+            <div className="p-3 rounded-xl bg-sky-950/50 border border-sky-500/30 text-xs text-sky-200 flex flex-wrap items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <MonitorPlay className="w-4 h-4 text-sky-400 shrink-0" />
+                <span>
+                  <strong className="text-white">โหมดเบราว์เซอร์ (Local Mode)</strong> — ข้อมูลถูกบันทึกในเครื่องนี้ และซิงค์ไป Google Sheets ได้ตามปกติ
+                </span>
+              </span>
+              <span className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleLoadStarterDemoDeals}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-800/80 hover:bg-slate-700 border border-slate-600/60 font-medium text-slate-200"
+                >
+                  <RotateCcw className="w-3 h-3" />
+                  <span>รีเซ็ตข้อมูลตัวอย่าง</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={exitLocalMode}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 font-semibold text-sky-100"
+                >
+                  <Database className="w-3 h-3" />
+                  <span>เชื่อมต่อ D1 / ใส่ Token</span>
+                </button>
+              </span>
+            </div>
+          )}
+
           <HealthBadge health={health} onRefresh={refreshHealth} isChecking={isCheckingHealth} />
-          {dealsError && (
+
+          {!isLocalMode && dealsError && (
             <div className="p-3 rounded-xl bg-rose-950/60 border border-rose-500/30 text-xs text-rose-200 flex flex-wrap items-center justify-between gap-2">
               <span className="flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 {dealsError}
               </span>
-              <button
-                onClick={() => {
-                  localStorage.removeItem(DASHBOARD_TOKEN_KEY);
-                  setDashboardToken('');
-                  setDealsError(null);
-                }}
-                className="px-2 py-1 rounded-md bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 font-medium"
-              >
-                เปลี่ยนรหัสผู้ดูแล
-              </button>
+              <span className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={enterLocalMode}
+                  className="px-2.5 py-1 rounded-md bg-sky-500/20 hover:bg-sky-500/30 border border-sky-500/40 text-sky-100 font-medium"
+                >
+                  สลับไปใช้โหมดเบราว์เซอร์ (Local Mode)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    localStorage.removeItem(DASHBOARD_TOKEN_KEY);
+                    setDashboardToken('');
+                    setDealsError(null);
+                  }}
+                  className="px-2.5 py-1 rounded-md bg-rose-500/20 hover:bg-rose-500/30 border border-rose-500/40 font-medium"
+                >
+                  เปลี่ยนรหัสผู้ดูแล
+                </button>
+              </span>
             </div>
           )}
 
-          {pendingSaveCount > 0 && (
+          {!isLocalMode && pendingSaveCount > 0 && (
             <div className="p-3 rounded-xl bg-amber-950/50 border border-amber-500/30 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-2">
               <span className="flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" />
